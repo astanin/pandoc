@@ -95,6 +95,7 @@ module Text.Pandoc
                , writeRTF
                , writeODT
                , writeEPUB
+               , writeFB2
                , writeOrg
                -- * Writer options used in writers 
                , WriterOptions (..)
@@ -128,6 +129,7 @@ import Text.Pandoc.Writers.Texinfo
 import Text.Pandoc.Writers.HTML
 import Text.Pandoc.Writers.ODT
 import Text.Pandoc.Writers.EPUB
+import Text.Pandoc.Writers.FB2
 import Text.Pandoc.Writers.Docbook
 import Text.Pandoc.Writers.OpenDocument
 import Text.Pandoc.Writers.Man
@@ -192,6 +194,7 @@ writers = [("native"       , writeNative)
           ,("textile"      , writeTextile)
           ,("rtf"          , writeRTF)
           ,("org"          , writeOrg)
+          ,("fb2"          , writeFB2)
           ]
 
 -- | Converts a transformation on the Pandoc AST into a function
