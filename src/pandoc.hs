@@ -51,7 +51,7 @@ import Control.Monad (when, unless, liftM)
 import Network.HTTP (simpleHTTP, mkRequest, getResponseBody, RequestMethod(..))
 import Network.URI (parseURI, isURI, URI(..))
 import qualified Data.ByteString.Lazy as B
-import Data.ByteString.Lazy.UTF8 (toString )
+import Data.ByteString.Lazy.UTF8 (toString, fromString)
 import Codec.Binary.UTF8.String (decodeString, encodeString)
 
 copyrightMessage :: String
@@ -81,7 +81,7 @@ wrapWords c = wrap' c c where
                                                        else ", "  ++ x ++ wrap' cols (remaining - (length x + 2)) xs
 
 isNonTextOutput :: String -> Bool
-isNonTextOutput = (`elem` ["odt","epub"])
+isNonTextOutput = (`elem` ["odt","epub","fb2"])
 
 -- | Data structure for command line options.
 data Opt = Opt
@@ -570,7 +570,7 @@ usageMessage :: String -> [OptDescr (Opt -> IO Opt)] -> String
 usageMessage programName = usageInfo
   (programName ++ " [OPTIONS] [FILES]" ++ "\nInput formats:  " ++
   (intercalate ", " $ map fst readers) ++ "\nOutput formats:  " ++
-  (intercalate ", " $ map fst writers ++ ["odt","epub"]) ++ "\nOptions:")
+  (intercalate ", " $ map fst writers ++ ["odt","epub","fb2"]) ++ "\nOptions:")
 
 -- Determine default reader based on source file extensions
 defaultReaderName :: String -> [FilePath] -> String
@@ -861,6 +861,9 @@ main = do
         Nothing | writerName' == "epub" ->
            writeEPUB epubStylesheet writerOptions doc2
            >>= B.writeFile (encodeString outputFile)
+        Nothing | writerName' == "fb2" -> do
+           d <- writeFB2 writerOptions doc2
+           B.writeFile (encodeString outputFile) (fromString d)
         Nothing | writerName' == "odt"  ->
            writeODT referenceODT writerOptions doc2
            >>= B.writeFile (encodeString outputFile)

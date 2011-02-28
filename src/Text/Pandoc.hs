@@ -194,7 +194,6 @@ writers = [("native"       , writeNative)
           ,("textile"      , writeTextile)
           ,("rtf"          , writeRTF)
           ,("org"          , writeOrg)
-          ,("fb2"          , writeFB2)
           ]
 
 -- | Converts a transformation on the Pandoc AST into a function
