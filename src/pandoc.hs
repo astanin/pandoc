@@ -41,7 +41,7 @@ import System.Exit ( exitWith, ExitCode (..) )
 import System.FilePath
 import System.Console.GetOpt
 import Data.Char ( toLower )
-import Data.List ( intercalate, isSuffixOf, isPrefixOf )
+import Data.List ( intercalate, isSuffixOf, isPrefixOf, sort )
 import System.Directory ( getAppUserDataDirectory, doesFileExist )
 import System.IO ( stdout, stderr )
 import qualified Text.Pandoc.UTF8 as UTF8
@@ -567,10 +567,14 @@ options =
 
 -- Returns usage message
 usageMessage :: String -> [OptDescr (Opt -> IO Opt)] -> String
-usageMessage programName = usageInfo
-  (programName ++ " [OPTIONS] [FILES]" ++ "\nInput formats:  " ++
-  (intercalate ", " $ map fst readers) ++ "\nOutput formats:  " ++
-  (intercalate ", " $ map fst writers ++ ["odt","epub","fb2"]) ++ "\nOptions:")
+usageMessage programName =
+  let outs = sort $ map fst writers ++ map fst iowriters ++ ["odt","epub"]
+      ins = sort $ map fst readers
+  in  usageInfo $ unlines
+          [ programName ++ " [OPTIONS] [FILES]"
+          , "Input formats:  " ++ intercalate ", " ins
+          , "Output formats:  " ++ intercalate ", " outs
+          , "Options:" ]
 
 -- Determine default reader based on source file extensions
 defaultReaderName :: String -> [FilePath] -> String
