@@ -51,7 +51,7 @@ import Control.Monad (when, unless, liftM)
 import Network.HTTP (simpleHTTP, mkRequest, getResponseBody, RequestMethod(..))
 import Network.URI (parseURI, isURI, URI(..))
 import qualified Data.ByteString.Lazy as B
-import Data.ByteString.Lazy.UTF8 (toString, fromString)
+import Data.ByteString.Lazy.UTF8 (toString)
 import Codec.Binary.UTF8.String (decodeString, encodeString)
 
 copyrightMessage :: String
@@ -81,7 +81,7 @@ wrapWords c = wrap' c c where
                                                        else ", "  ++ x ++ wrap' cols (remaining - (length x + 2)) xs
 
 isNonTextOutput :: String -> Bool
-isNonTextOutput = (`elem` ["odt","epub","fb2"])
+isNonTextOutput = (`elem` ["odt","epub"])
 
 -- | Data structure for command line options.
 data Opt = Opt
@@ -857,19 +857,23 @@ main = do
                 processBiblio cslfile' refs doc1
              else return doc1
 
-  case lookup writerName' writers of
-        Nothing | writerName' == "epub" ->
-           writeEPUB epubStylesheet writerOptions doc2
-           >>= B.writeFile (encodeString outputFile)
-        Nothing | writerName' == "fb2" -> do
-           d <- writeFB2 writerOptions doc2
-           B.writeFile (encodeString outputFile) (fromString d)
-        Nothing | writerName' == "odt"  ->
-           writeODT referenceODT writerOptions doc2
-           >>= B.writeFile (encodeString outputFile)
-        Just r  -> writerFn outputFile result
+  let purewriter = lookup writerName' writers
+  let iowriter = lookup writerName' iowriters
+  case (purewriter, iowriter) of
+        (Nothing, Just writer) -> do
+            d <- writer writerOptions doc2
+            if outputFile == "-"
+              then UTF8.putStrLn d
+              else UTF8.writeFile outputFile d
+        (Just writer, _) -> writerFn outputFile result
             where writerFn "-" = UTF8.putStr
                   writerFn f   = UTF8.writeFile f
-                  result       = r writerOptions doc2 ++
+                  result       = writer writerOptions doc2 ++
                                  ['\n' | not standalone']
-        Nothing -> error $ "Unknown writer: " ++ writerName'
+        _ | writerName' == "epub" ->
+           writeEPUB epubStylesheet writerOptions doc2
+           >>= B.writeFile (encodeString outputFile)
+        _ | writerName' == "odt"  ->
+           writeODT referenceODT writerOptions doc2
+           >>= B.writeFile (encodeString outputFile)
+        _ -> error $ "Unknown writer: " ++ writerName'

@@ -62,6 +62,7 @@ module Text.Pandoc
                -- * Lists of readers and writers
                , readers
                , writers
+               , iowriters
                -- * Readers: converting /to/ Pandoc format
                , readMarkdown
                , readRST
@@ -195,6 +196,12 @@ writers = [("native"       , writeNative)
           ,("rtf"          , writeRTF)
           ,("org"          , writeOrg)
           ]
+
+-- | Association list of formats and writers which require IO to work.
+-- These writers produce text output as well as thoses in 'writers'.
+iowriters :: [ (String, WriterOptions -> Pandoc -> IO String) ]
+iowriters = [ ("fb2"       , writeFB2)
+            ]
 
 -- | Converts a transformation on the Pandoc AST into a function
 -- that reads and writes a JSON-encoded string.  This is useful
