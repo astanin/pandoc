@@ -490,6 +490,14 @@ options =
                   "FILENAME")
                  "" -- "Path of epub.css"
 
+    , Option "" ["epub-cover-image"]
+                 (ReqArg
+                  (\arg opt ->
+                     return opt { optVariables =
+                                 ("epub-cover-image", arg) : optVariables opt })
+                  "FILENAME")
+                 "" -- "Path of epub cover image"
+
     , Option "" ["epub-metadata"]
                  (ReqArg
                   (\arg opt -> do

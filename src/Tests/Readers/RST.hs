@@ -17,7 +17,10 @@ infix 5 =:
 (=:) = test rst
 
 tests :: [Test]
-tests = [ "field list" =:
+tests = [ "line block with blank line" =:
+          "| a\n|\n|  b" =?> para (str "a" +++ linebreak +++
+                                   linebreak +++ str " " +++ str "b")
+        , "field list" =:
           [_LIT|
 :Hostname: media08
 :IP address: 10.0.0.19
@@ -32,6 +35,8 @@ tests = [ "field list" =:
    with the first line, but they must be indented relative to the
    field name marker, and they must line up with each other.
 :Parameter i: integer
+:Final: item
+  on two lines
 |]         =?> ( setAuthors ["Me","Myself","I"]
                $ setDate "2001-08-16"
                $ doc
@@ -41,6 +46,15 @@ tests = [ "field list" =:
                                 , (str "Version", [para "1"])
                                 , (str "Indentation", [para "Since the field marker may be quite long, the second and subsequent lines of the field body do not have to line up with the first line, but they must be indented relative to the field name marker, and they must line up with each other."])
                                 , (str "Parameter i", [para "integer"])
+                                , (str "Final", [para "item on two lines"])
                               ])
+        , "URLs with following punctuation" =:
+          ("http://google.com, http://yahoo.com; http://foo.bar.baz.\n" ++
+           "http://foo.bar/baz_(bam) (http://foo.bar)") =?>
+          para (link "http://google.com" "" "http://google.com" +++ ", " +++
+                link "http://yahoo.com" "" "http://yahoo.com" +++ "; " +++
+                link "http://foo.bar.baz" "" "http://foo.bar.baz" +++ ". " +++
+                link "http://foo.bar/baz_(bam)" "" "http://foo.bar/baz_(bam)"
+                +++ " (" +++ link "http://foo.bar" "" "http://foo.bar" +++ ")")
         ]
 

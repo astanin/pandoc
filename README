@@ -379,6 +379,10 @@ Options
     user data directory (see `--data-dir`, below).  If it is not
     found there, sensible defaults will be used.
 
+`--epub-cover-image=`*FILE*
+:   Use the specified image as the EPUB cover.  It is recommended
+    that the image be less than 1000px in width and height.
+
 `--epub-metadata=`*FILE*
 :   Look in the specified XML file for metadata for the EPUB.
     The file should contain a series of Dublin Core elements,
@@ -430,6 +434,12 @@ Options
     will use a default style:  either `default.csl` in the
     user data directory (see `--data-dir`), or, if that is
     not present, the Chicago author-date style.
+
+`--natbib`
+:   Use natbib for citations in LaTeX output.
+
+`--biblatex`
+:   Use biblatex for citations in LaTeX output.
 
 `--data-dir=`*DIRECTORY*
 :   Specify the user data directory to search for pandoc data files.
@@ -1981,7 +1991,7 @@ Nathan Gass, Jonathan Daugherty, Jérémy Bobbio, Justin Bogner.
 [groff man]: http://developer.apple.com/DOCUMENTATION/Darwin/Reference/ManPages/man7/groff_man.7.html
 [Haskell]:  http://www.haskell.org/
 [GNU Texinfo]: http://www.gnu.org/software/texinfo/
-[Emacs Org-Mode]: http://org-mode.org
+[Emacs Org-Mode]: http://orgmode.org
 [EPUB]: http://www.idpf.org/
 [GPL]: http://www.gnu.org/copyleft/gpl.html "GNU General Public License"
 

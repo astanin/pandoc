@@ -58,7 +58,7 @@ underlineChars = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"
 
 -- treat these as potentially non-text when parsing inline:
 specialChars :: [Char]
-specialChars = "\\`|*_<>$:[-.\"'\8216\8217\8220\8221"
+specialChars = "\\`|*_<>$:[]()-.\"'\8216\8217\8220\8221"
 
 --
 -- parsing documents
@@ -162,6 +162,7 @@ fieldListItem indent = try $ do
   (name, raw) <- rawFieldListItem indent
   let term = [Str name]
   contents <- parseFromString (many block) raw
+  optional blanklines
   case (name, contents) of
        ("Author", x) -> do
            updateState $ \st ->
@@ -187,7 +188,6 @@ fieldList :: GenParser Char ParserState Block
 fieldList = try $ do
   indent <- lookAhead $ many spaceChar
   items <- many1 $ fieldListItem indent
-  blanklines
   if null items
      then return Null
      else return $ DefinitionList $ catMaybes items
@@ -198,11 +198,14 @@ fieldList = try $ do
 
 lineBlockLine :: GenParser Char ParserState [Inline]
 lineBlockLine = try $ do
-  string "| "
+  char '|'
+  char ' ' <|> lookAhead (char '\n')
   white <- many spaceChar
   line <- many $ (notFollowedBy newline >> inline) <|> (try $ endline >>~ char ' ')
   optional endline
-  return $ normalizeSpaces $ (if null white then [] else [Str white]) ++ line
+  return $ if null white
+              then normalizeSpaces line
+              else Str white : normalizeSpaces line
 
 lineBlock :: GenParser Char ParserState Block
 lineBlock = try $ do
@@ -330,15 +333,14 @@ indentedLine indents = try $ do
   string indents
   manyTill anyChar newline
 
--- two or more indented lines, possibly separated by blank lines.
+-- one or more indented lines, possibly separated by blank lines.
 -- any amount of indentation will work.
 indentedBlock :: GenParser Char st [Char]
-indentedBlock = try $ do 
+indentedBlock = try $ do
   indents <- lookAhead $ many1 spaceChar
-  lns <- many $ choice $ [ indentedLine indents,
-                           try $ do b <- blanklines
-                                    l <- indentedLine indents
-                                    return (b ++ l) ]
+  lns <- many1 $ try $ do b <- option "" blanklines
+                          l <- indentedLine indents
+                          return (b ++ l)
   optional blanklines
   return $ unlines lns
 
@@ -864,10 +866,16 @@ note = try $ do
   case lookup ref notes of
     Nothing   -> fail "note not found"
     Just raw  -> do
+      -- We temporarily empty the note list while parsing the note,
+      -- so that we don't get infinite loops with notes inside notes...
+      -- Note references inside other notes are allowed in reST, but
+      -- not yet in this implementation.
+      updateState $ \st -> st{ stateNotes = [] }
       contents <- parseFromString parseBlocks raw
-      when (ref == "*" || ref == "#") $ do -- auto-numbered
-        -- delete the note so the next auto-numbered note
-        -- doesn't get the same contents:
-        let newnotes = deleteFirstsBy (==) notes [(ref,raw)]
-        updateState $ \st -> st{ stateNotes = newnotes }
+      let newnotes = if (ref == "*" || ref == "#") -- auto-numbered
+                        -- delete the note so the next auto-numbered note
+                        -- doesn't get the same contents:
+                        then deleteFirstsBy (==) notes [(ref,raw)]
+                        else notes
+      updateState $ \st -> st{ stateNotes = newnotes }
       return $ Note contents

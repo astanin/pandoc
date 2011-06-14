@@ -1187,7 +1187,14 @@ note = try $ do
   let notes = stateNotes state
   case lookup ref notes of
     Nothing   -> fail "note not found"
-    Just raw  -> liftM Note $ parseFromString parseBlocks raw
+    Just raw  -> do
+       -- We temporarily empty the note list while parsing the note,
+       -- so that we don't get infinite loops with notes inside notes...
+       -- Note references inside other notes do not work.
+       updateState $ \st -> st{ stateNotes = [] }
+       contents <- parseFromString parseBlocks raw
+       updateState $ \st -> st{ stateNotes = notes }
+       return $ Note contents
 
 inlineNote :: GenParser Char ParserState Inline
 inlineNote = try $ do
@@ -1283,7 +1290,7 @@ citeKey = try $ do
   suppress_author <- option False (char '-' >> return True)
   char '@'
   first <- letter
-  rest <- many $ (noneOf ",;]@ \t\n")
+  rest <- many $ (noneOf ",;!?[]()@ \t\n")
   let key = first:rest
   st <- getState
   guard $ key `elem` stateCitations st
