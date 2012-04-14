@@ -2,7 +2,7 @@
 ,Header 2 [Str "Blank",Space,Str "line",Space,Str "before",Space,Str "URL",Space,Str "in",Space,Str "link",Space,Str "reference"]
 ,Para [Link [Str "foo"] ("/url",""),Space,Str "and",Space,Link [Str "bar"] ("/url","title")]
 ,Header 2 [Str "Raw",Space,Str "ConTeXt",Space,Str "environments"]
-,Plain [RawInline "tex" "\\placeformula"]
+,Plain [RawInline "tex" "\\placeformula "]
 ,RawBlock "context" "\\startformula\n   L_{1} = L_{2}\n   \\stopformula"
 ,RawBlock "context" "\\start[a2]\n\\start[a2]\n\\stop[a2]\n\\stop[a2]"
 ,Header 2 [Str "URLs",Space,Str "with",Space,Str "spaces"]
@@ -29,9 +29,9 @@
 ,Para [Str "`",Str "hi"]
 ,Para [Str "there",Str "`"]
 ,Header 2 [Str "Multilingual",Space,Str "URLs"]
-,Para [Link [Code ("",["url"],[]) "http://\27979.com?\27979=\27979"] ("http://%E6%B5%8B.com?%E6%B5%8B=%E6%B5%8B","")]
-,Para [Link [Str "foo"] ("/bar/%E6%B5%8B?x=%E6%B5%8B","title")]
-,Para [Link [Code ("",["url"],[]) "\27979@foo.\27979.baz"] ("mailto:%E6%B5%8B@foo.%E6%B5%8B.baz","")]
+,Plain [RawInline "html" "<http://\27979.com?\27979=\27979>"]
+,Para [Link [Str "foo"] ("/bar/\27979?x=\27979","title")]
+,Para [Link [Code ("",["url"],[]) "\27979@foo.\27979.baz"] ("mailto:\27979@foo.\27979.baz","")]
 ,Header 2 [Str "Numbered",Space,Str "examples"]
 ,OrderedList (1,Example,TwoParens)
  [[Plain [Str "First",Space,Str "example",Str "."]]
@@ -47,4 +47,14 @@
 ,Para [Link [Str "bat"] ("/bat","")]
 ,Header 2 [Str "Curly",Space,Str "smart",Space,Str "quotes"]
 ,Para [Quoted DoubleQuote [Str "Hi"]]
-,Para [Quoted SingleQuote [Str "Hi"]]]
+,Para [Quoted SingleQuote [Str "Hi"]]
+,Header 2 [Str "Consecutive",Space,Str "lists"]
+,BulletList
+ [[Plain [Str "one"]]
+ ,[Plain [Str "two"]]]
+,OrderedList (1,Decimal,Period)
+ [[Plain [Str "one"]]
+ ,[Plain [Str "two"]]]
+,OrderedList (1,LowerAlpha,Period)
+ [[Plain [Str "one"]]
+ ,[Plain [Str "two"]]]]

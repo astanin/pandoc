@@ -68,7 +68,8 @@ import Control.Monad ( guard, liftM )
 readTextile :: ParserState -- ^ Parser state, including options for parser
              -> String      -- ^ String to parse (assuming @'\n'@ line endings)
              -> Pandoc
-readTextile state s = (readWith parseTextile) state (s ++ "\n\n")
+readTextile state s =
+  (readWith parseTextile) state{ stateOldDashes = True } (s ++ "\n\n")
 
 
 --
@@ -77,7 +78,7 @@ readTextile state s = (readWith parseTextile) state (s ++ "\n\n")
 
 -- | Special chars border strings parsing
 specialChars :: [Char]
-specialChars = "\\[]<>*#_@~-+^&,.;:!?|\"'%()"
+specialChars = "\\[]<>*#_@~-+^&,.;:!?|\"'%()="
 
 -- | Generate a Pandoc ADT from a textile document
 parseTextile :: GenParser Char ParserState Pandoc
@@ -227,14 +228,14 @@ bulletListItemAtDepth depth = try $ do
   return (p:sublist)
 
 -- | Ordered List of given depth, depth being the number of
--- leading '#'
+-- leading '#'
 orderedListAtDepth :: Int -> GenParser Char ParserState Block
 orderedListAtDepth depth = try $ do
   items <- many1 (orderedListItemAtDepth depth)
   return (OrderedList (1, DefaultStyle, DefaultDelim) items)
 
 -- | Ordered List Item of given depth, depth being the number of
--- leading '#'
+-- leading '#'
 orderedListItemAtDepth :: Int -> GenParser Char ParserState [Block]
 orderedListItemAtDepth depth = try $ do
   count depth (char '#')
@@ -369,6 +370,7 @@ inlineParsers = [ autoLink
                 , whitespace
                 , endline
                 , code
+                , escapedInline
                 , htmlSpan
                 , rawHtmlInline
                 , note
@@ -436,6 +438,8 @@ str = do
               next <- lookAhead letter
               guard $ isLetter (last xs) || isLetter next
               return $ xs ++ "-"
+  pos <- getPosition
+  updateState $ \s -> s{ stateLastStrPos = Just pos }
   return $ Str result
 
 -- | Textile allows HTML span infos, we discard them
@@ -465,7 +469,7 @@ link :: GenParser Char ParserState Inline
 link = try $ do
   name <- surrounded (char '"') inline
   char ':'
-  url <- manyTill (anyChar) (lookAhead $ (space <|> try (oneOf ".;," >> (space <|> newline))))
+  url <- manyTill (anyChar) (lookAhead $ (space <|> try (oneOf ".;,:" >> (space <|> newline))))
   return $ Link name (url, "")
 
 -- | Detect plain links to http or email.
@@ -482,6 +486,23 @@ image = try $ do
   alt <- option "" (try $ (char '(' >> manyTill anyChar (char ')')))
   char '!'
   return $ Image [Str alt] (src, alt)
+
+escapedInline :: GenParser Char ParserState Inline
+escapedInline = escapedEqs <|> escapedTag
+
+-- | literal text escaped between == ... ==
+escapedEqs :: GenParser Char ParserState Inline
+escapedEqs = try $ do
+  string "=="
+  contents <- manyTill anyChar (try $ string "==")
+  return $ Str contents
+
+-- | literal text escaped btw <notextile> tags
+escapedTag :: GenParser Char ParserState Inline
+escapedTag = try $ do
+  string "<notextile>"
+  contents <- manyTill anyChar (try $ string "</notextile>")
+  return $ Str contents
 
 -- | Any special symbol defined in specialChars
 symbol :: GenParser Char ParserState Inline

@@ -1,5 +1,5 @@
 {-# OPTIONS_GHC -fno-warn-orphans #-}
-{-# LANGUAGE TypeSynonymInstances #-}
+{-# LANGUAGE TypeSynonymInstances, FlexibleInstances, ScopedTypeVariables #-}
 -- provides Arbitrary instance for Pandoc types
 module Tests.Arbitrary ()
 where
@@ -22,13 +22,13 @@ arbAttr = do
   return (id',classes,keyvals)
 
 instance Arbitrary Inlines where
-  arbitrary = liftM fromList arbitrary
+  arbitrary = liftM (fromList :: [Inline] -> Inlines) arbitrary
 
 instance Arbitrary Blocks where
-  arbitrary = liftM fromList arbitrary
+  arbitrary = liftM (fromList :: [Block] -> Blocks) arbitrary
 
 instance Arbitrary Inline where
-  arbitrary = resize 3 $ arbInline 3
+  arbitrary = resize 3 $ arbInline 2
 
 arbInlines :: Int -> Gen [Inline]
 arbInlines n = listOf1 (arbInline n) `suchThat` (not . startsWithSpace)
@@ -41,10 +41,6 @@ arbInline :: Int -> Gen Inline
 arbInline n = frequency $ [ (60, liftM Str realString)
                           , (60, return Space)
                           , (10, liftM2 Code arbAttr realString)
-                          , (5,  return EmDash)
-                          , (5,  return EnDash)
-                          , (5,  return Apostrophe)
-                          , (5,  return Ellipses)
                           , (5,  elements [ RawInline "html" "<a id=\"eek\">"
                                           , RawInline "latex" "\\my{command}" ])
                           ] ++ [ x | x <- nesters, n > 1]
@@ -72,7 +68,7 @@ arbInline n = frequency $ [ (60, liftM Str realString)
                    ]
 
 instance Arbitrary Block where
-  arbitrary = resize 3 $ arbBlock 3
+  arbitrary = resize 3 $ arbBlock 2
 
 arbBlock :: Int -> Gen Block
 arbBlock n = frequency $ [ (10, liftM Plain $ arbInlines (n-1))

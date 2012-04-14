@@ -46,8 +46,8 @@ import Text.Pandoc.Shared
 import Text.Pandoc.Parsing
 import Data.Maybe ( fromMaybe, isJust )
 import Data.List ( intercalate )
-import Data.Char ( isSpace, isDigit )
-import Control.Monad ( liftM, guard )
+import Data.Char ( isSpace, isDigit, toLower )
+import Control.Monad ( liftM, guard, when )
 
 -- | Convert HTML-formatted string to 'Pandoc' document.
 readHtml :: ParserState   -- ^ Parser state
@@ -75,7 +75,7 @@ parseHeader tags = (Meta{docTitle = tit'', docAuthors = [], docDate = []}, rest)
                                                 t ~== TagOpen "body" []) tags
 
 parseBody :: TagParser [Block]
-parseBody = liftM concat $ manyTill block eof
+parseBody = liftM (fixPlains False . concat) $ manyTill block eof
 
 block :: TagParser [Block]
 block = choice
@@ -90,9 +90,17 @@ block = choice
             , pRawHtmlBlock
             ]
 
+-- repeated in SelfContained -- consolidate eventually
 renderTags' :: [Tag String] -> String
 renderTags' = renderTagsOptions
-               renderOptions{ optMinimize = (`elem` ["hr","br","img"]) }
+               renderOptions{ optMinimize = \x ->
+                                    let y = map toLower x
+                                    in  y == "hr" || y == "br" ||
+                                        y == "img" || y == "meta" ||
+                                        y == "link"
+                            , optRawTag = \x ->
+                                    let y = map toLower x
+                                    in  y == "script" || y == "style" }
 
 pList :: TagParser [Block]
 pList = pBulletList <|> pOrderedList <|> pDefinitionList
@@ -107,7 +115,7 @@ pBulletList = try $ do
   -- treat it as a list item, though it's not valid xhtml...
   skipMany nonItem
   items <- manyTill (pInTags "li" block >>~ skipMany nonItem) (pCloses "ul")
-  return [BulletList items]
+  return [BulletList $ map (fixPlains True) items]
 
 pOrderedList :: TagParser [Block]
 pOrderedList = try $ do
@@ -138,7 +146,7 @@ pOrderedList = try $ do
   -- treat it as a list item, though it's not valid xhtml...
   skipMany nonItem
   items <- manyTill (pInTags "li" block >>~ skipMany nonItem) (pCloses "ol")
-  return [OrderedList (start, style, DefaultDelim) items]
+  return [OrderedList (start, style, DefaultDelim) $ map (fixPlains True) items]
 
 pDefinitionList :: TagParser [Block]
 pDefinitionList = try $ do
@@ -154,7 +162,22 @@ pDefListItem = try $ do
   defs  <- many1 (try $ skipMany nonItem >> pInTags "dd" block)
   skipMany nonItem
   let term = intercalate [LineBreak] terms
-  return (term, defs)
+  return (term, map (fixPlains True) defs)
+
+fixPlains :: Bool -> [Block] -> [Block]
+fixPlains inList bs = if any isParaish bs
+                         then map plainToPara bs
+                         else bs
+  where isParaish (Para _) = True
+        isParaish (CodeBlock _ _) = True
+        isParaish (Header _ _) = True
+        isParaish (BlockQuote _) = True
+        isParaish (BulletList _) = not inList
+        isParaish (OrderedList _ _) = not inList
+        isParaish (DefinitionList _) = not inList
+        isParaish _        = False
+        plainToPara (Plain xs) = Para xs
+        plainToPara x = x
 
 pRawTag :: TagParser String
 pRawTag = do
@@ -199,9 +222,10 @@ pSimpleTable :: TagParser [Block]
 pSimpleTable = try $ do
   TagOpen _ _ <- pSatisfy (~== TagOpen "table" [])
   skipMany pBlank
-  head' <- option [] $ pInTags "th" pTd
-  rows <- many1 $ try $
-           skipMany pBlank >> pInTags "tr" pTd
+  head' <- option [] $ pOptInTag "thead" $ pInTags "tr" (pCell "th")
+  skipMany pBlank
+  rows <- pOptInTag "tbody"
+          $ many1 $ try $ skipMany pBlank >> pInTags "tr" (pCell "td")
   skipMany pBlank
   TagClose _ <- pSatisfy (~== TagClose "table") 
   let cols = maximum $ map length rows
@@ -209,17 +233,17 @@ pSimpleTable = try $ do
   let widths = replicate cols 0
   return [Table [] aligns widths head' rows]
 
-pTd :: TagParser [TableCell]
-pTd = try $ do
+pCell :: String -> TagParser [TableCell]
+pCell celltype = try $ do
   skipMany pBlank
-  res <- pInTags "td" pPlain
+  res <- pInTags celltype pPlain
   skipMany pBlank
   return [res]
 
 pBlockQuote :: TagParser [Block]
 pBlockQuote = do
   contents <- pInTags "blockquote" block
-  return [BlockQuote contents]
+  return [BlockQuote $ fixPlains False contents]
 
 pPlain :: TagParser [Block]
 pPlain = do
@@ -358,13 +382,23 @@ pInlinesInTags :: String -> ([Inline] -> Inline)
                -> TagParser [Inline]
 pInlinesInTags tagtype f = do
   contents <- pInTags tagtype inline
-  return [f contents]
+  return [f $ normalizeSpaces contents]
 
 pInTags :: String -> TagParser [a]
         -> TagParser [a]
 pInTags tagtype parser = try $ do
   pSatisfy (~== TagOpen tagtype [])
   liftM concat $ manyTill parser (pCloses tagtype <|> eof)
+
+pOptInTag :: String -> TagParser a
+          -> TagParser a
+pOptInTag tagtype parser = try $ do
+  open <- option False (pSatisfy (~== TagOpen tagtype []) >> return True)
+  skipMany pBlank
+  x <- parser
+  skipMany pBlank
+  when open $ pCloses tagtype
+  return x
 
 pCloses :: String -> TagParser ()
 pCloses tagtype = try $ do
@@ -391,10 +425,16 @@ pBlank = try $ do
   guard $ all isSpace str
 
 pTagContents :: GenParser Char ParserState Inline
-pTagContents =  pStr <|> pSpace <|> smartPunctuation pTagContents <|> pSymbol
+pTagContents =
+  pStr <|> pSpace <|> smartPunctuation pTagContents <|> pSymbol <|> pBad
 
 pStr :: GenParser Char ParserState Inline
-pStr = liftM Str $ many1 $ satisfy $ \c -> not (isSpace c) && not (isSpecial c)
+pStr = do
+  result <- many1 $ satisfy $ \c ->
+                     not (isSpace c) && not (isSpecial c) && not (isBad c)
+  pos <- getPosition
+  updateState $ \s -> s{ stateLastStrPos = Just pos }
+  return $ Str result
 
 isSpecial :: Char -> Bool
 isSpecial '"' = True
@@ -409,6 +449,43 @@ isSpecial _ = False
 
 pSymbol :: GenParser Char ParserState Inline
 pSymbol = satisfy isSpecial >>= return . Str . (:[])
+
+isBad :: Char -> Bool
+isBad c = c >= '\128' && c <= '\159' -- not allowed in HTML
+
+pBad :: GenParser Char ParserState Inline
+pBad = do
+  c <- satisfy isBad
+  let c' = case c of
+                '\128' -> '\8364'
+                '\130' -> '\8218'
+                '\131' -> '\402'
+                '\132' -> '\8222'
+                '\133' -> '\8230'
+                '\134' -> '\8224'
+                '\135' -> '\8225'
+                '\136' -> '\710'
+                '\137' -> '\8240'
+                '\138' -> '\352'
+                '\139' -> '\8249'
+                '\140' -> '\338'
+                '\142' -> '\381'
+                '\145' -> '\8216'
+                '\146' -> '\8217'
+                '\147' -> '\8220'
+                '\148' -> '\8221'
+                '\149' -> '\8226'
+                '\150' -> '\8211'
+                '\151' -> '\8212'
+                '\152' -> '\732'
+                '\153' -> '\8482'
+                '\154' -> '\353'
+                '\155' -> '\8250'
+                '\156' -> '\339'
+                '\158' -> '\382'
+                '\159' -> '\376'
+                _      -> '?'
+  return $ Str [c']
 
 pSpace :: GenParser Char ParserState Inline
 pSpace = many1 (satisfy isSpace) >> return Space
@@ -438,16 +515,35 @@ blockHtmlTags = ["address", "blockquote", "body", "center", "dir", "div",
                  "dt", "frameset", "li", "tbody", "td", "tfoot",
                  "th", "thead", "tr", "script", "style"]
 
+-- We want to allow raw docbook in markdown documents, so we
+-- include docbook block tags here too.
+blockDocBookTags :: [String]
+blockDocBookTags = ["calloutlist", "bibliolist", "glosslist", "itemizedlist",
+                    "orderedlist", "segmentedlist", "simplelist",
+                    "variablelist", "caution", "important", "note", "tip",
+                    "warning", "address", "literallayout", "programlisting",
+                    "programlistingco", "screen", "screenco", "screenshot",
+                    "synopsis", "example", "informalexample", "figure",
+                    "informalfigure", "table", "informaltable", "para",
+                    "simpara", "formalpara", "equation", "informalequation",
+                    "figure", "screenshot", "mediaobject", "qandaset",
+                    "procedure", "task", "cmdsynopsis", "funcsynopsis",
+                    "classsynopsis", "blockquote", "epigraph", "msgset",
+                    "sidebar", "title"]
+
+blockTags :: [String]
+blockTags = blockHtmlTags ++ blockDocBookTags
+
 isInlineTag :: Tag String -> Bool
-isInlineTag t = tagOpen (`notElem` blockHtmlTags) (const True) t ||
-                tagClose (`notElem` blockHtmlTags) t ||
+isInlineTag t = tagOpen (`notElem` blockTags) (const True) t ||
+                tagClose (`notElem` blockTags) t ||
                 tagComment (const True) t
 
 isBlockTag :: Tag String -> Bool
 isBlockTag t = tagOpen (`elem` blocktags) (const True) t ||
                tagClose (`elem` blocktags) t ||
                tagComment (const True) t
-                 where blocktags = blockHtmlTags ++ eitherBlockOrInline
+                 where blocktags = blockTags ++ eitherBlockOrInline
 
 isTextTag :: Tag String -> Bool
 isTextTag = tagText (const True)
@@ -482,8 +578,8 @@ t `closes` t2 |
    t `elem` ["h1","h2","h3","h4","h5","h6","dl","ol","ul","table","div","p"] &&
    t2 `elem` ["h1","h2","h3","h4","h5","h6","p" ] = True -- not "div"
 t1 `closes` t2 |
-   t1 `elem` blockHtmlTags &&
-   t2 `notElem` (blockHtmlTags ++ eitherBlockOrInline) = True
+   t1 `elem` blockTags &&
+   t2 `notElem` (blockTags ++ eitherBlockOrInline) = True
 _ `closes` _ = False
 
 --- parsers for use in markdown, textile readers

@@ -1,7 +1,19 @@
-\documentclass{article}
+\documentclass[]{article}
 \usepackage{amssymb,amsmath}
-\usepackage[mathletters]{ucs}
-\usepackage[utf8x]{inputenc}
+\usepackage{ifxetex,ifluatex}
+\ifxetex
+  \usepackage{fontspec,xltxtra,xunicode}
+  \defaultfontfeatures{Mapping=tex-text,Scale=MatchLowercase}
+  \newcommand{\euro}{€}
+\else
+  \ifluatex
+    \usepackage{fontspec}
+    \defaultfontfeatures{Mapping=tex-text,Scale=MatchLowercase}
+    \newcommand{\euro}{€}
+  \else
+    \usepackage[utf8]{inputenc}
+  \fi
+\fi
 \usepackage{fancyvrb}
 % Redefine labelwidth for lists; otherwise, the enumerate package will cause
 % markers to extend beyond the left margin.
@@ -10,10 +22,6 @@
     {\setlength{\labelwidth}{4em}}
 }\makeatother
 \usepackage{enumerate}
-\usepackage[normalem]{ulem}
-% avoid problems with \sout in headers with hyperref:
-\pdfstringdefDisableCommands{\renewcommand{\sout}{}}
-\newcommand{\textsubscr}[1]{\ensuremath{_{\scriptsize\textrm{#1}}}}
 \usepackage{url}
 \usepackage{graphicx}
 % We will generate all images so they have a width \maxwidth. This means
@@ -25,14 +33,36 @@
 \makeatother
 \let\Oldincludegraphics\includegraphics
 \renewcommand{\includegraphics}[1]{\Oldincludegraphics[width=\maxwidth]{#1}}
-\usepackage[breaklinks=true,unicode=true,pdfborder={0 0 0}]{hyperref}
+\ifxetex
+  \usepackage[setpagesize=false, % page size defined by xetex
+              unicode=false, % unicode breaks when used with xetex
+              xetex,
+              bookmarks=true,
+              pdfauthor={John MacFarlane; Anonymous},
+              pdftitle={Pandoc Test Suite},
+              colorlinks=true,
+              linkcolor=blue]{hyperref}
+\else
+  \usepackage[unicode=true,
+              bookmarks=true,
+              pdfauthor={John MacFarlane; Anonymous},
+              pdftitle={Pandoc Test Suite},
+              colorlinks=true,
+              linkcolor=blue]{hyperref}
+\fi
+\hypersetup{breaklinks=true, pdfborder={0 0 0}}
+\usepackage[normalem]{ulem}
+% avoid problems with \sout in headers with hyperref:
+\pdfstringdefDisableCommands{\renewcommand{\sout}{}}
+\newcommand{\textsubscr}[1]{\ensuremath{_{\scriptsize\textrm{#1}}}}
 \setlength{\parindent}{0pt}
 \setlength{\parskip}{6pt plus 2pt minus 1pt}
+\setlength{\emergencystretch}{3em}  % prevent overfull lines
 \setcounter{secnumdepth}{0}
 \VerbatimFootnotes % allows verbatim text in footnotes
 
 \title{Pandoc Test Suite}
-\author{John MacFarlane\\Anonymous}
+\author{John MacFarlane \and Anonymous}
 \date{July 17, 2006}
 
 \begin{document}
@@ -558,7 +588,8 @@ So is \textbf{\emph{this}} word.
 
 So is \textbf{\emph{this}} word.
 
-This is code: \verb!>!, \verb!$!, \verb!\!, \verb!\$!, \verb!<html>!.
+This is code: \texttt{\textgreater{}}, \texttt{\$}, \texttt{\textbackslash{}},
+\texttt{\textbackslash{}\$}, \texttt{\textless{}html\textgreater{}}.
 
 \sout{This is \emph{strikeout}.}
 
@@ -568,7 +599,7 @@ a\textsuperscript{hello~there}.
 Subscripts: H\textsubscr{2}O, H\textsubscr{23}O, H\textsubscr{many~of~them}O.
 
 These should not be superscripts or subscripts, because of the unescaped
-spaces: a\^{}b c\^{}d, a\ensuremath{\sim}b c\ensuremath{\sim}d.
+spaces: a\^{}b c\^{}d, a\textasciitilde{}b c\textasciitilde{}d.
 
 \begin{center}\rule{3in}{0.4pt}\end{center}
 
@@ -582,7 +613,7 @@ spaces: a\^{}b c\^{}d, a\ensuremath{\sim}b c\ensuremath{\sim}d.
 
 `He said, ``I want to go.''\,' Were you alive in the 70's?
 
-Here is some quoted `\verb!code!' and a
+Here is some quoted `\texttt{code}' and a
 ``\href{http://example.com/?foo=1\&bar=2}{quoted link}''.
 
 Some dashes: one---two --- three---four --- five.
@@ -618,14 +649,14 @@ These shouldn't be math:
 
 \begin{itemize}
 \item
-  To get the famous equation, write \verb!$e = mc^2$!.
+  To get the famous equation, write \texttt{\$e = mc\^{}2\$}.
 \item
   \$22,000 is a \emph{lot} of money. So is \$34,000. (It worked if ``lot'' is
   emphasized.)
 \item
   Shoes (\$20) and socks (\$5).
 \item
-  Escaped \verb!$!: \$73 \emph{this should be emphasized} 23\$.
+  Escaped \texttt{\$}: \$73 \emph{this should be emphasized} 23\$.
 \end{itemize}
 Here's a LaTeX table:
 
@@ -777,7 +808,8 @@ An e-mail address:
 Blockquoted: \url{http://example.com/}
 
 \end{quote}
-Auto-links should not occur here: \verb!<http://example.com/>!
+Auto-links should not occur here:
+\texttt{\textless{}http://example.com/\textgreater{}}
 
 \begin{verbatim}
 or here: <http://example.com/>
@@ -808,15 +840,15 @@ Here is a footnote reference,\footnote{Here is the footnote. It can go
   Subsequent blocks are indented to show that they belong to the footnote (as
   with list items).
 
-  \begin{Verbatim}
+\begin{Verbatim}
   { <code> }
-  \end{Verbatim}
+\end{Verbatim}
   If you want, you can indent every line, but you can also be lazy and just
   indent the first line of each block.} This should \emph{not} be a footnote
 reference, because it contains a space.{[}\^{}my note{]} Here is an inline
 note.\footnote{This is \emph{easier} to type. Inline notes may contain
-  \href{http://google.com}{links} and \verb!]! verbatim characters, as well as
-  {[}bracketed text{]}.}
+  \href{http://google.com}{links} and \texttt{{]}} verbatim characters, as
+  well as {[}bracketed text{]}.}
 
 \begin{quote}
 Notes can go in quotes.\footnote{In quote.}

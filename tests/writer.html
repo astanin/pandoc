@@ -2,14 +2,20 @@
 <html xmlns="http://www.w3.org/1999/xhtml">
 <head>
   <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+  <meta http-equiv="Content-Style-Type" content="text/css" />
   <meta name="generator" content="pandoc" />
   <meta name="author" content="John MacFarlane" />
   <meta name="author" content="Anonymous" />
-  <meta name="date" content="July 17, 2006" />
+  <meta name="date" content="2006-07-17" />
   <title>Pandoc Test Suite</title>
 </head>
 <body>
+<div id="header">
 <h1 class="title">Pandoc Test Suite</h1>
+<h2 class="author">John MacFarlane</h2>
+<h2 class="author">Anonymous</h2>
+<h3 class="date">July 17, 2006</h3>
+</div>
 <p>This is a set of tests for pandoc. Most of them are adapted from John Gruber’s markdown test suite.</p>
 <hr />
 <h1 id="headers">Headers</h1>
@@ -39,8 +45,7 @@
 <p>Code in a block quote:</p>
 <pre><code>sub status {
     print &quot;working&quot;;
-}
-</code></pre>
+}</code></pre>
 <p>A list:</p>
 <ol style="list-style-type: decimal">
 <li>item one</li>
@@ -65,13 +70,11 @@ sub status {
     print &quot;working&quot;;
 }
 
-this code block is indented by one tab
-</code></pre>
+this code block is indented by one tab</code></pre>
 <p>And:</p>
 <pre><code>    this code block is indented by two tabs
 
-These should not be escaped:  \$ \\ \&gt; \[ \{
-</code></pre>
+These should not be escaped:  \$ \\ \&gt; \[ \{</code></pre>
 <hr />
 <h1 id="lists">Lists</h1>
 <h2 id="unordered">Unordered</h2>
@@ -268,8 +271,7 @@ These should not be escaped:  \$ \\ \&gt; \[ \{
 </dd>
 <dt><em>orange</em></dt>
 <dd><p>orange fruit</p>
-<pre><code>{ orange code block }
-</code></pre>
+<pre><code>{ orange code block }</code></pre>
 <blockquote>
 <p>orange block quote</p>
 </blockquote>
@@ -352,11 +354,9 @@ foo
 <p>This should be a code block, though:</p>
 <pre><code>&lt;div&gt;
     foo
-&lt;/div&gt;
-</code></pre>
+&lt;/div&gt;</code></pre>
 <p>As should this:</p>
-<pre><code>&lt;div&gt;foo&lt;/div&gt;
-</code></pre>
+<pre><code>&lt;div&gt;foo&lt;/div&gt;</code></pre>
 <p>Now, nested:</p>
 <div>
     <div>
@@ -381,14 +381,12 @@ Blah
 -->
 
 <p>Code block:</p>
-<pre><code>&lt;!-- Comment --&gt;
-</code></pre>
+<pre><code>&lt;!-- Comment --&gt;</code></pre>
 <p>Just plain comment, with trailing spaces on the line:</p>
 <!-- foo -->   
 
 <p>Code:</p>
-<pre><code>&lt;hr /&gt;
-</code></pre>
+<pre><code>&lt;hr /&gt;</code></pre>
 <p>Hr’s:</p>
 <hr>
 
@@ -418,7 +416,7 @@ Blah
 <p><strong><em>This is strong and em.</em></strong></p>
 <p>So is <strong><em>this</em></strong> word.</p>
 <p>This is code: <code>&gt;</code>, <code>$</code>, <code>\</code>, <code>\$</code>, <code>&lt;html&gt;</code>.</p>
-<p><span style="text-decoration: line-through;">This is <em>strikeout</em>.</span></p>
+<p><del>This is <em>strikeout</em>.</del></p>
 <p>Superscripts: a<sup>bc</sup>d a<sup><em>hello</em></sup> a<sup>hello there</sup>.</p>
 <p>Subscripts: H<sub>2</sub>O, H<sub>23</sub>O, H<sub>many of them</sub>O.</p>
 <p>These should not be superscripts or subscripts, because of the unescaped spaces: a^b c^d, a~b c~d.</p>
@@ -438,11 +436,11 @@ Blah
 <li></li>
 <li><span class="math">2 + 2 = 4</span></li>
 <li><span class="math"><em>x</em> ∈ <em>y</em></span></li>
-<li><span class="math">α ∧ ω</span></li>
+<li><span class="math"><em>α</em> ∧ <em>ω</em></span></li>
 <li><span class="math">223</span></li>
 <li><span class="math"><em>p</em></span>-Tree</li>
 <li>Here’s some display math: <br /><span class="math">$\frac{d}{dx}f(x)=\lim_{h\to 0}\frac{f(x+h)-f(x)}{h}$</span><br /></li>
-<li>Here’s one that has a line break in it: <span class="math">α + ω × <em>x</em><sup>2</sup></span>.</li>
+<li>Here’s one that has a line break in it: <span class="math"><em>α</em> + <em>ω</em> × <em>x</em><sup>2</sup></span>.</li>
 </ul>
 <p>These shouldn’t be math:</p>
 <ul>
@@ -511,8 +509,7 @@ document.write('<a h'+'ref'+'="ma'+'ilto'+':'+e+'">'+'Email link'+'<\/'+'a'+'>')
 <p>Indented <a href="/url">twice</a>.</p>
 <p>Indented <a href="/url">thrice</a>.</p>
 <p>This should [not][] be a link.</p>
-<pre><code>[not]: /url
-</code></pre>
+<pre><code>[not]: /url</code></pre>
 <p>Foo <a href="/url/" title="Title with &quot;quotes&quot; inside">bar</a>.</p>
 <p>Foo <a href="/url/" title="Title with &quot;quote&quot; inside">biz</a>.</p>
 <h2 id="with-ampersands">With ampersands</h2>
@@ -537,8 +534,7 @@ document.write('<a h'+'ref'+'="ma'+'ilto'+':'+e+'">'+'<code>'+e+'</code>'+'<\/'+
 <p>Blockquoted: <a href="http://example.com/"><code class="url">http://example.com/</code></a></p>
 </blockquote>
 <p>Auto-links should not occur here: <code>&lt;http://example.com/&gt;</code></p>
-<pre><code>or here: &lt;http://example.com/&gt;
-</code></pre>
+<pre><code>or here: &lt;http://example.com/&gt;</code></pre>
 <hr />
 <h1 id="images">Images</h1>
 <p>From “Voyage dans la Lune” by Georges Melies (1902):</p>
@@ -559,15 +555,14 @@ document.write('<a h'+'ref'+'="ma'+'ilto'+':'+e+'">'+'<code>'+e+'</code>'+'<\/'+
 <div class="footnotes">
 <hr />
 <ol>
-<li id="fn1"><p>Here is the footnote. It can go anywhere after the footnote reference. It need not be placed at the end of the document. <a href="#fnref1" class="footnoteBackLink" title="Jump back to footnote 1">↩</a></p></li>
+<li id="fn1"><p>Here is the footnote. It can go anywhere after the footnote reference. It need not be placed at the end of the document.<a href="#fnref1">↩</a></p></li>
 <li id="fn2"><p>Here’s the long note. This one contains multiple blocks.</p>
 <p>Subsequent blocks are indented to show that they belong to the footnote (as with list items).</p>
-<pre><code>  { &lt;code&gt; }
-</code></pre>
-<p>If you want, you can indent every line, but you can also be lazy and just indent the first line of each block. <a href="#fnref2" class="footnoteBackLink" title="Jump back to footnote 2">↩</a></p></li>
-<li id="fn3"><p>This is <em>easier</em> to type. Inline notes may contain <a href="http://google.com">links</a> and <code>]</code> verbatim characters, as well as [bracketed text]. <a href="#fnref3" class="footnoteBackLink" title="Jump back to footnote 3">↩</a></p></li>
-<li id="fn4"><p>In quote. <a href="#fnref4" class="footnoteBackLink" title="Jump back to footnote 4">↩</a></p></li>
-<li id="fn5"><p>In list. <a href="#fnref5" class="footnoteBackLink" title="Jump back to footnote 5">↩</a></p></li>
+<pre><code>  { &lt;code&gt; }</code></pre>
+<p>If you want, you can indent every line, but you can also be lazy and just indent the first line of each block.<a href="#fnref2">↩</a></p></li>
+<li id="fn3"><p>This is <em>easier</em> to type. Inline notes may contain <a href="http://google.com">links</a> and <code>]</code> verbatim characters, as well as [bracketed text].<a href="#fnref3">↩</a></p></li>
+<li id="fn4"><p>In quote.<a href="#fnref4">↩</a></p></li>
+<li id="fn5"><p>In list.<a href="#fnref5">↩</a></p></li>
 </ol>
 </div>
 </body>

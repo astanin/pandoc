@@ -34,7 +34,7 @@ import Text.Pandoc.Definition
 import Text.Pandoc.Shared
 import Text.Pandoc.Parsing
 import Text.ParserCombinators.Parsec
-import Control.Monad ( when )
+import Control.Monad ( when, liftM )
 import Data.List ( findIndex, intercalate, transpose, sort, deleteFirstsBy )
 import qualified Data.Map as M
 import Text.Printf ( printf )
@@ -128,6 +128,8 @@ block = choice [ codeBlock
                , fieldList
                , imageBlock
                , customCodeBlock
+               , mathBlock
+               , defaultRoleBlock
                , unknownDirective
                , header
                , hrule
@@ -360,6 +362,33 @@ customCodeBlock = try $ do
   result <- indentedBlock
   return $ CodeBlock ("", ["sourceCode", language], []) $ stripTrailingNewlines result
 
+-- | The 'math' directive (from Sphinx) for display math.
+mathBlock :: GenParser Char st Block
+mathBlock = try $ do
+  string ".. math::"
+  mathBlockMultiline <|> mathBlockOneLine
+
+mathBlockOneLine :: GenParser Char st Block
+mathBlockOneLine = try $ do
+  result <- manyTill anyChar newline
+  blanklines
+  return $ Para [Math DisplayMath $ removeLeadingTrailingSpace result]
+
+mathBlockMultiline :: GenParser Char st Block
+mathBlockMultiline = try $ do
+  blanklines
+  result <- indentedBlock
+  -- a single block can contain multiple equations, which need to go
+  -- in separate Pandoc math elements
+  let lns = map removeLeadingTrailingSpace $ lines result
+  -- drop :label, :nowrap, etc.
+  let startsWithColon (':':_) = True
+      startsWithColon _       = False
+  let lns' = dropWhile startsWithColon lns
+  let eqs = map (removeLeadingTrailingSpace . unlines)
+            $ filter (not . null) $ splitBy null lns'
+  return $ Para $ map (Math DisplayMath) eqs
+
 lhsCodeBlock :: GenParser Char ParserState Block
 lhsCodeBlock = try $ do
   failUnlessLHS
@@ -505,6 +534,24 @@ bulletList = many1 (listItem bulletListStart) >>=
              return . BulletList . compactify
 
 --
+-- default-role block
+--
+
+defaultRoleBlock :: GenParser Char ParserState Block
+defaultRoleBlock = try $ do
+    string ".. default-role::"
+    -- doesn't enforce any restrictions on the role name; embedded spaces shouldn't be allowed, for one
+    role <- manyTill anyChar newline >>= return . removeLeadingTrailingSpace
+    updateState $ \s -> s { stateRstDefaultRole =
+        if null role
+           then stateRstDefaultRole defaultParserState
+           else role
+        }
+    -- skip body of the directive if it exists
+    many $ blanklines <|> (spaceChar >> manyTill anyChar newline)
+    return Null
+
+--
 -- unknown directive (e.g. comment)
 --
 
@@ -526,8 +573,8 @@ noteBlock = try $ do
   string ".."
   spaceChar >> skipMany spaceChar
   ref <- noteMarker
-  spaceChar >> skipMany spaceChar
-  first <- anyLine
+  first <- (spaceChar >> skipMany spaceChar >> anyLine)
+        <|> (newline >> return "")
   blanks <- option "" blanklines
   rest <- option "" indentedBlock
   endPos <- getPosition
@@ -540,9 +587,15 @@ noteBlock = try $ do
   return $ replicate (sourceLine endPos - sourceLine startPos) '\n'
 
 noteMarker :: GenParser Char ParserState [Char]
-noteMarker = char '[' >> (many1 digit <|> count 1 (oneOf "#*")) >>~ char ']'
+noteMarker = do
+  char '['
+  res <- many1 digit
+      <|> (try $ char '#' >> liftM ('#':) simpleReferenceName')
+      <|> count 1 (oneOf "#*")
+  char ']'
+  return res
 
--- 
+--
 -- reference key
 --
 
@@ -557,13 +610,20 @@ unquotedReferenceName = try $ do
   label' <- many1Till inline (lookAhead $ char ':')
   return label'
 
-isolated :: Char -> GenParser Char st Char
-isolated ch = try $ char ch >>~ notFollowedBy (char ch)
+-- Simple reference names are single words consisting of alphanumerics
+-- plus isolated (no two adjacent) internal hyphens, underscores,
+-- periods, colons and plus signs; no whitespace or other characters
+-- are allowed.
+simpleReferenceName' :: GenParser Char st String
+simpleReferenceName' = do
+  x <- alphaNum
+  xs <- many $  alphaNum
+            <|> (try $ oneOf "-_:+." >> lookAhead alphaNum)
+  return (x:xs)
 
 simpleReferenceName :: GenParser Char st [Inline]
 simpleReferenceName = do
-  raw <- many1 (alphaNum <|> isolated '-' <|> isolated '.' <|>
-                (try $ char '_' >>~ lookAhead alphaNum))
+  raw <- simpleReferenceName'
   return [Str raw]
 
 referenceName :: GenParser Char ParserState [Inline]
@@ -723,6 +783,7 @@ inline = choice [ whitespace
                 , image
                 , superscript
                 , subscript
+                , math
                 , note
                 , smartPunctuation inline
                 , hyphens
@@ -737,7 +798,10 @@ hyphens = do
   return $ Str result
 
 escapedChar :: GenParser Char st Inline
-escapedChar = escaped anyChar
+escapedChar = do c <- escaped anyChar
+                 return $ if c == ' '  -- '\ ' is null in RST
+                             then Str ""
+                             else Str [c]
 
 symbol :: GenParser Char ParserState Inline
 symbol = do 
@@ -760,24 +824,44 @@ strong :: GenParser Char ParserState Inline
 strong = enclosed (string "**") (try $ string "**") inline >>= 
          return . Strong . normalizeSpaces
 
-interpreted :: [Char] -> GenParser Char st [Inline]
+-- Parses inline interpreted text which is required to have the given role.
+-- This decision is based on the role marker (if present),
+-- and the current default interpreted text role.
+interpreted :: [Char] -> GenParser Char ParserState [Char]
 interpreted role = try $ do
-  optional $ try $ string "\\ "
-  result <- enclosed (string $ ":" ++ role ++ ":`") (char '`') anyChar
-  try (string "\\ ") <|> lookAhead (count 1 $ oneOf " \t\n") <|> (eof >> return "")
-  return [Str result]
+  state <- getState
+  if role == stateRstDefaultRole state
+     then try markedInterpretedText <|> unmarkedInterpretedText
+     else     markedInterpretedText
+ where
+  markedInterpretedText = try (roleMarker >> unmarkedInterpretedText)
+                          <|> (unmarkedInterpretedText >>= (\txt -> roleMarker >> return txt))
+  roleMarker = string $ ":" ++ role ++ ":"
+  -- Note, this doesn't precisely implement the complex rule in
+  -- http://docutils.sourceforge.net/docs/ref/rst/restructuredtext.html#inline-markup-recognition-rules
+  -- but it should be good enough for most purposes
+  unmarkedInterpretedText = do
+      result <- enclosed (char '`') (char '`') anyChar
+      return result
 
 superscript :: GenParser Char ParserState Inline
-superscript = interpreted "sup" >>= (return . Superscript)
+superscript = interpreted "sup" >>= \x -> return (Superscript [Str x])
 
 subscript :: GenParser Char ParserState Inline
-subscript = interpreted "sub" >>= (return . Subscript)
+subscript = interpreted "sub" >>= \x -> return (Subscript [Str x])
+
+math :: GenParser Char ParserState Inline
+math = interpreted "math" >>= \x -> return (Math InlineMath x)
 
 whitespace :: GenParser Char ParserState Inline
 whitespace = many1 spaceChar >> return Space <?> "whitespace"
 
 str :: GenParser Char ParserState Inline
-str = many1 (noneOf (specialChars ++ "\t\n ")) >>= return . Str
+str = do
+  result <- many1 (noneOf (specialChars ++ "\t\n "))
+  pos <- getPosition
+  updateState $ \s -> s{ stateLastStrPos = Just pos }
+  return $ Str result
 
 -- an endline character that can be treated as a space, not a structural break
 endline :: GenParser Char ParserState Inline

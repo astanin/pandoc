@@ -72,7 +72,7 @@ import Text.ParserCombinators.Parsec
 import Control.Monad (liftM, when, forM)
 import System.FilePath
 import Data.List (intercalate, intersperse)
-import Text.XHtml (primHtml, Html)
+import Text.Blaze (preEscapedString, Html)
 import Data.ByteString.Lazy.UTF8 (ByteString, fromString)
 import Text.Pandoc.Shared (readDataFile)
 import qualified Control.Exception.Extensible as E (try, IOException)
@@ -82,10 +82,13 @@ getDefaultTemplate :: (Maybe FilePath) -- ^ User data directory to search first
                    -> String           -- ^ Name of writer 
                    -> IO (Either E.IOException String)
 getDefaultTemplate _ "native" = return $ Right ""
+getDefaultTemplate _ "json"   = return $ Right ""
+getDefaultTemplate _ "docx"   = return $ Right ""
 getDefaultTemplate user "odt" = getDefaultTemplate user "opendocument"
+getDefaultTemplate user "epub" = getDefaultTemplate user "html"
 getDefaultTemplate user writer = do
   let format = takeWhile (/='+') writer  -- strip off "+lhs" if present
-  let fname = "templates" </> format  <.> "template"
+  let fname = "templates" </> "default" <.> format
   E.try $ readDataFile user fname
 
 data TemplateState = TemplateState Int [(String,String)]
@@ -109,7 +112,7 @@ instance TemplateTarget ByteString where
   toTarget = fromString
 
 instance TemplateTarget Html where
-  toTarget = primHtml
+  toTarget = preEscapedString
 
 -- | Renders a template 
 renderTemplate :: TemplateTarget a

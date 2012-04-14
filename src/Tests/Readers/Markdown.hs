@@ -12,7 +12,10 @@ import Text.Pandoc
 markdown :: String -> Pandoc
 markdown = readMarkdown defaultParserState{ stateStandalone = True }
 
-infix 5 =:
+markdownSmart :: String -> Pandoc
+markdownSmart = readMarkdown defaultParserState{ stateSmart = True }
+
+infix 4 =:
 (=:) :: ToString c
      => String -> (String, c) -> Test
 (=:) = test markdown
@@ -40,13 +43,49 @@ tests = [ testGroup "inline code"
             "`*` {.haskell .special x=\"7\"}"
             =?> para (codeWith ("",["haskell","special"],[("x","7")]) "*")
           ]
+        , testGroup "backslash escapes"
+          [ "in URL" =:
+            "[hi](/there\\))"
+            =?> para (link "/there)" "" "hi")
+          , "in title" =:
+            "[hi](/there \"a\\\"a\")"
+            =?> para (link "/there" "a\"a" "hi")
+          , "in reference link title" =:
+            "[hi]\n\n[hi]: /there (a\\)a)"
+            =?> para (link "/there" "a)a" "hi")
+          , "in reference link URL" =:
+            "[hi]\n\n[hi]: /there\\.0"
+            =?> para (link "/there.0" "" "hi")
+          ]
+        , testGroup "smart punctuation"
+          [ test markdownSmart "quote before ellipses"
+            ("'...hi'"
+            =?> para (singleQuoted ("…hi")))
+          , test markdownSmart "apostrophe before emph"
+            ("D'oh! A l'*aide*!"
+            =?> para ("D’oh! A l’" <> emph "aide" <> "!"))
+          , test markdownSmart "apostrophe in French"
+            ("À l'arrivée de la guerre, le thème de l'«impossibilité du socialisme»"
+            =?> para ("À l’arrivée de la guerre, le thème de l’«impossibilité du socialisme»"))
+          ]
+        , testGroup "mixed emphasis and strong"
+          [ "emph and strong emph alternating" =:
+            "*xxx* ***xxx*** xxx\n*xxx* ***xxx*** xxx"
+            =?> para (emph "xxx" <> space <> strong (emph "xxx") <>
+                      space <> "xxx" <> space <>
+                      emph "xxx" <> space <> strong (emph "xxx") <>
+                      space <> "xxx")
+          , "emph with spaced strong" =:
+            "*x **xx** x*"
+            =?> para (emph ("x" <> space <> strong "xx" <> space <> "x"))
+          ]
         , testGroup "footnotes"
           [ "indent followed by newline and flush-left text" =:
             "[^1]\n\n[^1]: my note\n\n     \nnot in note\n"
-            =?> para (note (para "my note")) +++ para "not in note"
+            =?> para (note (para "my note")) <> para "not in note"
           , "indent followed by newline and indented text" =:
             "[^1]\n\n[^1]: my note\n     \n    in note\n"
-            =?> para (note (para "my note" +++ para "in note"))
+            =?> para (note (para "my note" <> para "in note"))
           , "recursive note" =:
             "[^1]\n\n[^1]: See [^1]\n"
             =?> para (note (para "See [^1]"))
@@ -56,9 +95,9 @@ tests = [ testGroup "inline code"
               "inverse bird tracks and html" $
               "> a\n\n< b\n\n<div>\n"
               =?> codeBlockWith ("",["sourceCode","literate","haskell"],[]) "a"
-                  +++
+                  <>
                   codeBlockWith ("",["sourceCode","haskell"],[]) "b"
-                  +++
+                  <>
                   rawBlock "html" "<div>\n\n"
           ]
 -- the round-trip properties frequently fail

@@ -37,6 +37,8 @@ import Data.Ord ( comparing )
 import Data.Char ( chr, ord )
 import Control.Monad.State
 import Text.Pandoc.Pretty
+import Network.URI ( isAbsoluteURI, unEscapeString )
+import System.FilePath
 
 data WriterState = 
   WriterState { stStrikeout   :: Bool  -- document contains strikeout
@@ -94,6 +96,10 @@ stringToTexinfo = escapeStringUsing texinfoEscapes
                          , ('@', "@@")
                          , (',', "@comma{}") -- only needed in argument lists
                          , ('\160', "@ ")
+                         , ('\x2014', "---")
+                         , ('\x2013', "--")
+                         , ('\x2026', "@dots{}")
+                         , ('\x2019', "'")
                          ]
 
 -- | Puts contents into Texinfo command.
@@ -385,10 +391,6 @@ inlineToTexinfo (Quoted DoubleQuote lst) = do
 
 inlineToTexinfo (Cite _ lst) =
   inlineListToTexinfo lst
-inlineToTexinfo Apostrophe = return $ char '\''
-inlineToTexinfo EmDash = return $ text "---"
-inlineToTexinfo EnDash = return $ text "--"
-inlineToTexinfo Ellipses = return $ text "@dots{}"
 inlineToTexinfo (Str str) = return $ text (stringToTexinfo str)
 inlineToTexinfo (Math _ str) = return $ inCmd "math" $ text str
 inlineToTexinfo (RawInline f str) | f == "latex" || f == "tex" =
@@ -412,11 +414,11 @@ inlineToTexinfo (Image alternate (source, _)) = do
   return $ text ("@image{" ++ base ++ ",,,") <> content <> text "," <>
            text (ext ++ "}")
   where
-    (revext, revbase) = break (=='.') (reverse source)
-    ext  = reverse revext
-    base = case revbase of
-            ('.' : rest) -> reverse rest
-            _            -> reverse revbase
+    ext     = drop 1 $ takeExtension source'
+    base    = dropExtension source'
+    source' = if isAbsoluteURI source
+                 then source
+                 else unEscapeString source
 
 inlineToTexinfo (Note contents) = do
   contents' <- blockListToTexinfo contents

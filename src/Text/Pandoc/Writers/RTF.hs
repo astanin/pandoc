@@ -37,23 +37,28 @@ import Data.Char ( ord, isDigit, toLower )
 import System.FilePath ( takeExtension )
 import qualified Data.ByteString as B
 import Text.Printf ( printf )
+import Network.URI ( isAbsoluteURI, unEscapeString )
 
 -- | Convert Image inlines into a raw RTF embedded image, read from a file.
 -- If file not found or filetype not jpeg or png, leave the inline unchanged.
 rtfEmbedImage :: Inline -> IO Inline
-rtfEmbedImage x@(Image _ (src,_))
-  | map toLower (takeExtension src) `elem` [".jpg",".jpeg",".png"] = do
-  imgdata <- catch (B.readFile src) (\_ -> return B.empty)
-  let bytes = map (printf "%02x") $ B.unpack imgdata
-  let filetype = case map toLower (takeExtension src) of
-                      ".jpg" -> "\\jpegblip"
-                      ".jpeg" -> "\\jpegblip"
-                      ".png"  -> "\\pngblip"
-                      _      -> error "Unknown file type"
-  let raw = "{\\pict" ++ filetype ++ " " ++ concat bytes ++ "}"
-  return $ if B.null imgdata
-              then x
-              else RawInline "rtf" raw
+rtfEmbedImage x@(Image _ (src,_)) = do
+  let ext = map toLower (takeExtension src)
+  if ext `elem` [".jpg",".jpeg",".png"] && not (isAbsoluteURI src)
+     then do
+       let src' = unEscapeString src
+       imgdata <- catch (B.readFile src') (\_ -> return B.empty)
+       let bytes = map (printf "%02x") $ B.unpack imgdata
+       let filetype = case ext of
+                           ".jpg" -> "\\jpegblip"
+                           ".jpeg" -> "\\jpegblip"
+                           ".png"  -> "\\pngblip"
+                           _      -> error "Unknown file type"
+       let raw = "{\\pict" ++ filetype ++ " " ++ concat bytes ++ "}"
+       return $ if B.null imgdata
+                   then x
+                   else RawInline "rtf" raw
+     else return x
 rtfEmbedImage x = return x
 
 -- | Convert Pandoc to a string in rich text format.
@@ -101,7 +106,15 @@ handleUnicode (c:cs) =
 
 -- | Escape special characters.
 escapeSpecial :: String -> String
-escapeSpecial = escapeStringUsing (('\t',"\\tab "):(backslashEscapes "{\\}"))
+escapeSpecial = escapeStringUsing $
+  [ ('\t',"\\tab ")
+  , ('\8216',"\\u8216'")
+  , ('\8217',"\\u8217'")
+  , ('\8220',"\\u8220\"")
+  , ('\8221',"\\u8221\"")
+  , ('\8211',"\\u8211-")
+  , ('\8212',"\\u8212-")
+  ] ++ backslashEscapes "{\\}"
 
 -- | Escape strings as needed for rich text format.
 stringToRTF :: String -> String
@@ -282,10 +295,6 @@ inlineToRTF (Quoted SingleQuote lst) =
   "\\u8216'" ++ (inlineListToRTF lst) ++ "\\u8217'"
 inlineToRTF (Quoted DoubleQuote lst) = 
   "\\u8220\"" ++ (inlineListToRTF lst) ++ "\\u8221\""
-inlineToRTF Apostrophe = "\\u8217'"
-inlineToRTF Ellipses = "\\u8230?"
-inlineToRTF EmDash = "\\u8212-"
-inlineToRTF EnDash = "\\u8211-"
 inlineToRTF (Code _ str) = "{\\f1 " ++ (codeStringToRTF str) ++ "}"
 inlineToRTF (Str str) = stringToRTF str
 inlineToRTF (Math _ str) = inlineListToRTF $ readTeXMath str

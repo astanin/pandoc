@@ -35,8 +35,11 @@ import Text.Pandoc.Templates (renderTemplate)
 import Text.Pandoc.Readers.TeXMath
 import Data.List ( isPrefixOf, intercalate, isSuffixOf )
 import Data.Char ( toLower )
-import Text.Pandoc.Highlighting (languages, languagesByExtension)
+import Text.Pandoc.Highlighting ( languages, languagesByExtension )
 import Text.Pandoc.Pretty
+import Text.TeXMath
+import qualified Text.XML.Light as Xml
+import Data.Generics (everywhere, mkT)
 
 -- | Convert list of authors to a docbook <author> section
 authorToDocbook :: WriterOptions -> [Inline] -> Doc
@@ -69,34 +72,39 @@ writeDocbook opts (Pandoc (Meta tit auths dat) blocks) =
                     then Just $ writerColumns opts
                     else Nothing
       render' = render colwidth
-      opts' = if "</book>" `isSuffixOf`
+      opts' = if "/book>" `isSuffixOf`
                       (removeTrailingSpace $ writerTemplate opts)
                  then opts{ writerChapters = True }
                  else opts
-      main     = render' $ vcat (map (elementToDocbook opts') elements)
+      startLvl = if writerChapters opts' then 0 else 1
+      main     = render' $ vcat (map (elementToDocbook opts' startLvl) elements)
       context = writerVariables opts ++
                 [ ("body", main)
                 , ("title", render' title)
                 , ("date", render' date) ] ++
-                [ ("author", render' a) | a <- authors ]
+                [ ("author", render' a) | a <- authors ] ++
+                [ ("mathml", "yes") | case writerHTMLMathMethod opts of
+                                            MathML _ -> True
+                                            _ -> False ]
   in  if writerStandalone opts
          then renderTemplate context $ writerTemplate opts
          else main
 
 -- | Convert an Element to Docbook.
-elementToDocbook :: WriterOptions -> Element -> Doc
-elementToDocbook opts (Blk block) = blockToDocbook opts block 
-elementToDocbook opts (Sec _ _num id' title elements) =
+elementToDocbook :: WriterOptions -> Int -> Element -> Doc
+elementToDocbook opts _   (Blk block) = blockToDocbook opts block 
+elementToDocbook opts lvl (Sec _ _num id' title elements) =
   -- Docbook doesn't allow sections with no content, so insert some if needed
   let elements' = if null elements
                     then [Blk (Para [])]
                     else elements
-      tag = if writerChapters opts
-               then "chapter"
-               else "section"
+      tag = case lvl of
+                 n | n == 0           -> "chapter"
+                   | n >= 1 && n <= 5 -> "sect" ++ show n
+                   | otherwise        -> "simplesect"
   in  inTags True tag [("id",id')] $
       inTagsSimple "title" (inlinesToDocbook opts title) $$
-      vcat (map (elementToDocbook opts{ writerChapters = False }) elements') 
+      vcat (map (elementToDocbook opts (lvl + 1)) elements')
 
 -- | Convert a list of Pandoc blocks to Docbook.
 blocksToDocbook :: WriterOptions -> [Block] -> Doc
@@ -147,9 +155,9 @@ blockToDocbook opts (Para lst) =
   inTagsIndented "para" $ inlinesToDocbook opts lst
 blockToDocbook opts (BlockQuote blocks) =
   inTagsIndented "blockquote" $ blocksToDocbook opts blocks
-blockToDocbook _ (CodeBlock (_,classes,_) str) = 
-  text ("<screen" ++ lang ++ ">") <> cr <>
-     flush (text (escapeStringForXML str) <> cr <> text "</screen>")
+blockToDocbook _ (CodeBlock (_,classes,_) str) =
+  text ("<programlisting" ++ lang ++ ">") <> cr <>
+     flush (text (escapeStringForXML str) <> cr <> text "</programlisting>")
     where lang  = if null langs
                      then ""
                      else " language=\"" ++ escapeStringForXML (head langs) ++
@@ -185,24 +193,24 @@ blockToDocbook _ (RawBlock "html" str) = text str -- raw XML block
 blockToDocbook _ (RawBlock _ _) = empty
 blockToDocbook _ HorizontalRule = empty -- not semantic
 blockToDocbook opts (Table caption aligns widths headers rows) =
-  let alignStrings = map alignmentToString aligns
-      captionDoc   = if null caption
+  let captionDoc   = if null caption
                         then empty
-                        else inTagsIndented "caption" 
+                        else inTagsIndented "title"
                               (inlinesToDocbook opts caption)
       tableType    = if isEmpty captionDoc then "informaltable" else "table"
-      percent w    = show (truncate (100*w) :: Integer) ++ "%"
-      coltags = if all (== 0.0) widths
-                   then empty
-                   else vcat $ map (\w ->
-                          selfClosingTag "col" [("width", percent w)]) widths
+      percent w    = show (truncate (100*w) :: Integer) ++ "*"
+      coltags = vcat $ zipWith (\w al -> selfClosingTag "colspec"
+                       ([("colwidth", percent w) | w > 0] ++
+                        [("align", alignmentToString al)])) widths aligns
       head' = if all null headers
                  then empty
                  else inTagsIndented "thead" $
-                         tableRowToDocbook opts alignStrings "th" headers
+                         tableRowToDocbook opts headers
       body' = inTagsIndented "tbody" $
-              vcat $ map (tableRowToDocbook opts alignStrings "td") rows
-  in  inTagsIndented tableType $ captionDoc $$ coltags $$ head' $$ body'
+              vcat $ map (tableRowToDocbook opts) rows
+  in  inTagsIndented tableType $ captionDoc $$
+        (inTags True "tgroup" [("cols", show (length headers))] $
+         coltags $$ head' $$ body')
 
 alignmentToString :: Alignment -> [Char]
 alignmentToString alignment = case alignment of
@@ -212,22 +220,16 @@ alignmentToString alignment = case alignment of
                                  AlignDefault -> "left"
 
 tableRowToDocbook :: WriterOptions
-                  -> [String]
-                  -> String
                   -> [[Block]]
                   -> Doc
-tableRowToDocbook opts aligns celltype cols =
-  inTagsIndented "tr" $ vcat $
-     zipWith (tableItemToDocbook opts celltype) aligns cols
+tableRowToDocbook opts cols =
+  inTagsIndented "row" $ vcat $ map (tableItemToDocbook opts) cols
 
 tableItemToDocbook :: WriterOptions
-                   -> [Char]
-                   -> [Char]
                    -> [Block]
                    -> Doc
-tableItemToDocbook opts tag align item =
-  let attrib = [("align", align)]
-  in  inTags True tag attrib $ vcat $ map (blockToDocbook opts) item
+tableItemToDocbook opts item =
+  inTags True "entry" [] $ vcat $ map (blockToDocbook opts) item
 
 -- | Convert a list of inline elements to Docbook.
 inlinesToDocbook :: WriterOptions -> [Inline] -> Doc
@@ -254,14 +256,27 @@ inlineToDocbook opts (Quoted _ lst) =
   inTagsSimple "quote" $ inlinesToDocbook opts lst
 inlineToDocbook opts (Cite _ lst) =
   inlinesToDocbook opts lst 
-inlineToDocbook _ Apostrophe = char '\''
-inlineToDocbook _ Ellipses = text "…"
-inlineToDocbook _ EmDash = text "—"
-inlineToDocbook _ EnDash = text "–"
 inlineToDocbook _ (Code _ str) = 
   inTagsSimple "literal" $ text (escapeStringForXML str)
-inlineToDocbook opts (Math _ str) = inlinesToDocbook opts $ readTeXMath str
-inlineToDocbook _ (RawInline _ _) = empty
+inlineToDocbook opts (Math t str)
+  | isMathML (writerHTMLMathMethod opts) =
+    case texMathToMathML dt str of
+      Right r -> inTagsSimple tagtype
+                 $ text $ Xml.ppcElement conf
+                 $ fixNS
+                 $ removeAttr r
+      Left  _ -> inlinesToDocbook opts
+                 $ readTeXMath str
+  | otherwise = inlinesToDocbook opts $ readTeXMath str
+     where (dt, tagtype) = case t of
+                            InlineMath  -> (DisplayInline,"inlineequation")
+                            DisplayMath -> (DisplayBlock,"informalequation")
+           conf = Xml.useShortEmptyTags (const False) Xml.defaultConfigPP
+           removeAttr e = e{ Xml.elAttribs = [] }
+           fixNS' qname = qname{ Xml.qPrefix = Just "mml" }
+           fixNS = everywhere (mkT fixNS')
+inlineToDocbook _ (RawInline f x) | f == "html" || f == "docbook" = text x
+                                  | otherwise                     = empty
 inlineToDocbook _ LineBreak = inTagsSimple "literallayout" empty
 inlineToDocbook _ Space = space
 inlineToDocbook opts (Link txt (src, _)) =
@@ -286,3 +301,7 @@ inlineToDocbook _ (Image _ (src, tit)) =
       titleDoc $$ selfClosingTag "imagedata" [("fileref", src)]
 inlineToDocbook opts (Note contents) = 
   inTagsIndented "footnote" $ blocksToDocbook opts contents
+
+isMathML :: HTMLMathMethod -> Bool
+isMathML (MathML _) = True
+isMathML _          = False

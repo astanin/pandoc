@@ -17,7 +17,7 @@
 \setcounter{secnumdepth}{0}
 \VerbatimFootnotes % allows verbatim text in footnotes
 \title{Pandoc Test Suite}
-\author{John MacFarlane\\Anonymous}
+\author{John MacFarlane \and Anonymous}
 \date{July 17, 2006}
 \begin{document}
 \maketitle
@@ -629,6 +629,13 @@ Here's a LaTeX table:
 Animal & Number \\ \hline
 Dog    & 2      \\
 Cat    & 1      \\ \hline
+\end{tabular}
+
+A table with one column:
+
+\begin{tabular}{c}
+Animal \\
+Vegetable
 \end{tabular}
 
 \begin{center}\rule{3in}{0.4pt}\end{center}
