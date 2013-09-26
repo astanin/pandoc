@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8" ?>
-<!DOCTYPE article PUBLIC "-//OASIS//DTD DocBook XML V4.4//EN"
-                  "http://www.oasis-open.org/docbook/xml/4.4/docbookx.dtd">
+<!DOCTYPE article PUBLIC "-//OASIS//DTD DocBook XML V4.5//EN"
+                  "http://www.oasis-open.org/docbook/xml/4.5/docbookx.dtd">
 <article>
   <articleinfo>
     <title>Pandoc Test Suite</title>
@@ -67,7 +67,8 @@
     Here’s one with a bullet. * criminey.
   </para>
   <para>
-    There should be a hard line break<literallayout></literallayout>here.
+    There should be a hard line break<literallayout>
+</literallayout>here.
   </para>
 </sect1>
 <sect1 id="block-quotes">
@@ -861,22 +862,18 @@ These should not be escaped:  \$ \\ \&gt; \[ \{
   <para>
     Simple block on one line:
   </para>
-  <div>
-  foo
-  </div>
+  <para>
+    foo
+  </para>
   <para>
     And nested without indentation:
   </para>
-  <div>
-  <div>
-  <div>
-  foo
-  </div>
-  </div>
-  <div>
-  bar
-  </div>
-  </div>
+  <para>
+    foo
+  </para>
+  <para>
+    bar
+  </para>
   <para>
     Interpreted markdown in a table:
   </para>
@@ -895,10 +892,9 @@ These should not be escaped:  \$ \\ \&gt; \[ \{
   <para>
     Here’s a simple block:
   </para>
-  <div>
-      
-  foo
-  </div>
+  <para>
+    foo
+  </para>
   <para>
     This should be a code block, though:
   </para>
@@ -916,14 +912,9 @@ These should not be escaped:  \$ \\ \&gt; \[ \{
   <para>
     Now, nested:
   </para>
-  <div>
-      <div>
-          <div>
-              
-  foo
-  </div>
-      </div>
-  </div>
+  <para>
+    foo
+  </para>
   <para>
     This should just be an HTML comment:
   </para>
@@ -1323,7 +1314,7 @@ These should not be escaped:  \$ \\ \&gt; \[ \{
     <title>Autolinks</title>
     <para>
       With an ampersand:
-      <ulink url="http://example.com/?foo=1&amp;bar=2"><literal>http://example.com/?foo=1&amp;bar=2</literal></ulink>
+      <ulink url="http://example.com/?foo=1&amp;bar=2">http://example.com/?foo=1&amp;bar=2</ulink>
     </para>
     <itemizedlist>
       <listitem>
@@ -1333,7 +1324,7 @@ These should not be escaped:  \$ \\ \&gt; \[ \{
       </listitem>
       <listitem>
         <para>
-          <ulink url="http://example.com/"><literal>http://example.com/</literal></ulink>
+          <ulink url="http://example.com/">http://example.com/</ulink>
         </para>
       </listitem>
       <listitem>
@@ -1348,7 +1339,7 @@ These should not be escaped:  \$ \\ \&gt; \[ \{
     <blockquote>
       <para>
         Blockquoted:
-        <ulink url="http://example.com/"><literal>http://example.com/</literal></ulink>
+        <ulink url="http://example.com/">http://example.com/</ulink>
       </para>
     </blockquote>
     <para>

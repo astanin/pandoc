@@ -33,9 +33,11 @@ module Text.Pandoc.Writers.MediaWiki ( writeMediaWiki ) where
 import Text.Pandoc.Definition
 import Text.Pandoc.Options
 import Text.Pandoc.Shared
-import Text.Pandoc.Templates (renderTemplate)
+import Text.Pandoc.Writers.Shared
+import Text.Pandoc.Pretty (render)
+import Text.Pandoc.Templates (renderTemplate')
 import Text.Pandoc.XML ( escapeStringForXML )
-import Data.List ( intersect, intercalate )
+import Data.List ( intersect, intercalate, intersperse )
 import Network.URI ( isURI )
 import Control.Monad.State
 
@@ -53,18 +55,22 @@ writeMediaWiki opts document =
 
 -- | Return MediaWiki representation of document.
 pandocToMediaWiki :: WriterOptions -> Pandoc -> State WriterState String
-pandocToMediaWiki opts (Pandoc _ blocks) = do
+pandocToMediaWiki opts (Pandoc meta blocks) = do
+  metadata <- metaToJSON opts
+              (fmap trimr . blockListToMediaWiki opts)
+              (inlineListToMediaWiki opts)
+              meta
   body <- blockListToMediaWiki opts blocks
   notesExist <- get >>= return . stNotes
   let notes = if notesExist
                  then "\n<references />"
                  else ""
   let main = body ++ notes
-  let context = writerVariables opts ++
-                [ ("body", main) ] ++
-                [ ("toc", "yes") | writerTableOfContents opts ]
+  let context = defField "body" main
+                $ defField "toc" (writerTableOfContents opts)
+                $ metadata
   if writerStandalone opts
-     then return $ renderTemplate context $ writerTemplate opts
+     then return $ renderTemplate' (writerTemplate opts) context
      else return main
 
 -- | Escape special characters for MediaWiki.
@@ -78,10 +84,16 @@ blockToMediaWiki :: WriterOptions -- ^ Options
 
 blockToMediaWiki _ Null = return ""
 
+blockToMediaWiki opts (Div attrs bs) = do
+  contents <- blockListToMediaWiki opts bs
+  return $ render Nothing (tagWithAttrs "div" attrs) ++ "\n\n" ++
+                     contents ++ "\n\n" ++ "</div>"
+
 blockToMediaWiki opts (Plain inlines) =
   inlineListToMediaWiki opts inlines
 
-blockToMediaWiki opts (Para [Image txt (src,tit)]) = do
+-- title beginning with fig: indicates that the image is a figure
+blockToMediaWiki opts (Para [Image txt (src,'f':'i':'g':':':tit)]) = do
   capt <- if null txt
              then return ""
              else ("|caption " ++) `fmap` inlineListToMediaWiki opts txt
@@ -98,13 +110,14 @@ blockToMediaWiki opts (Para inlines) = do
               then  "<p>" ++ contents ++ "</p>"
               else contents ++ if null listLevel then "\n" else ""
 
-blockToMediaWiki _ (RawBlock "mediawiki" str) = return str
-blockToMediaWiki _ (RawBlock "html" str) = return str
-blockToMediaWiki _ (RawBlock _ _) = return ""
+blockToMediaWiki _ (RawBlock f str)
+  | f == Format "mediawiki" = return str
+  | f == Format "html"      = return str
+  | otherwise               = return ""
 
 blockToMediaWiki _ HorizontalRule = return "\n-----\n"
 
-blockToMediaWiki opts (Header level inlines) = do
+blockToMediaWiki opts (Header level _ inlines) = do
   contents <- inlineListToMediaWiki opts inlines
   let eqs = replicate level '='
   return $ eqs ++ " " ++ contents ++ " " ++ eqs ++ "\n"
@@ -129,25 +142,17 @@ blockToMediaWiki opts (BlockQuote blocks) = do
   return $ "<blockquote>" ++ contents ++ "</blockquote>"
 
 blockToMediaWiki opts (Table capt aligns widths headers rows') = do
-  let alignStrings = map alignmentToString aligns
-  captionDoc <- if null capt
-                   then return ""
-                   else do
-                      c <- inlineListToMediaWiki opts capt
-                      return $ "<caption>" ++ c ++ "</caption>\n"
-  let percent w = show (truncate (100*w) :: Integer) ++ "%"
-  let coltags = if all (== 0.0) widths
-                   then ""
-                   else unlines $ map
-                         (\w -> "<col width=\"" ++ percent w ++ "\" />") widths
-  head' <- if all null headers
-              then return ""
-              else do
-                 hs <- tableRowToMediaWiki opts alignStrings 0 headers
-                 return $ "<thead>\n" ++ hs ++ "\n</thead>\n"
-  body' <- zipWithM (tableRowToMediaWiki opts alignStrings) [1..] rows'
-  return $ "<table>\n" ++ captionDoc ++ coltags ++ head' ++
-            "<tbody>\n" ++ unlines body' ++ "</tbody>\n</table>\n"
+  caption <- if null capt
+                then return ""
+                else do
+                   c <- inlineListToMediaWiki opts capt
+                   return $ "|+ " ++ trimr c ++ "\n"
+  let headless = all null headers
+  let allrows = if headless then rows' else headers:rows'
+  tableBody <- (concat . intersperse "|-\n") `fmap`
+                mapM (tableRowToMediaWiki opts headless aligns widths)
+                     (zip [1..] allrows)
+  return $ "{|\n" ++ caption ++ tableBody ++ "|}\n"
 
 blockToMediaWiki opts x@(BulletList items) = do
   oldUseTags <- get >>= return . stUseTags
@@ -279,20 +284,34 @@ vcat = intercalate "\n"
 -- Auxiliary functions for tables:
 
 tableRowToMediaWiki :: WriterOptions
-                    -> [String]
-                    -> Int
-                    -> [[Block]]
+                    -> Bool
+                    -> [Alignment]
+                    -> [Double]
+                    -> (Int, [[Block]])
                     -> State WriterState String
-tableRowToMediaWiki opts alignStrings rownum cols' = do
-  let celltype = if rownum == 0 then "th" else "td"
-  let rowclass = case rownum of
-                      0                  -> "header"
-                      x | x `rem` 2 == 1 -> "odd"
-                      _                  -> "even"
-  cols'' <- sequence $ zipWith
-            (\alignment item -> tableItemToMediaWiki opts celltype alignment item)
-            alignStrings cols'
-  return $ "<tr class=\"" ++ rowclass ++ "\">\n" ++ unlines cols'' ++ "</tr>"
+tableRowToMediaWiki opts headless alignments widths (rownum, cells) = do
+  cells' <- mapM (\cellData ->
+          tableCellToMediaWiki opts headless rownum cellData)
+          $ zip3 alignments widths cells
+  return $ unlines cells'
+
+tableCellToMediaWiki :: WriterOptions
+                     -> Bool
+                     -> Int
+                     -> (Alignment, Double, [Block])
+                     -> State WriterState String
+tableCellToMediaWiki opts headless rownum (alignment, width, bs) = do
+  contents <- blockListToMediaWiki opts bs
+  let marker = if rownum == 1 && not headless then "!" else "|"
+  let percent w = show (truncate (100*w) :: Integer) ++ "%"
+  let attrs = ["align=" ++ show (alignmentToString alignment) |
+                 alignment /= AlignDefault && alignment /= AlignLeft] ++
+              ["width=\"" ++ percent width ++ "\"" |
+                 width /= 0.0 && rownum == 1]
+  let attr = if null attrs
+                then ""
+                else unwords attrs ++ "|"
+  return $ marker ++ attr ++ trimr contents
 
 alignmentToString :: Alignment -> [Char]
 alignmentToString alignment = case alignment of
@@ -300,17 +319,6 @@ alignmentToString alignment = case alignment of
                                  AlignRight   -> "right"
                                  AlignCenter  -> "center"
                                  AlignDefault -> "left"
-
-tableItemToMediaWiki :: WriterOptions
-                     -> String
-                     -> String
-                     -> [Block]
-                     -> State WriterState String
-tableItemToMediaWiki opts celltype align' item = do
-  let mkcell x = "<" ++ celltype ++ " align=\"" ++ align' ++ "\">" ++
-                    x ++ "</" ++ celltype ++ ">"
-  contents <- blockListToMediaWiki opts item
-  return $ mkcell contents
 
 -- | Convert list of Pandoc block elements to MediaWiki.
 blockListToMediaWiki :: WriterOptions -- ^ Options
@@ -326,6 +334,10 @@ inlineListToMediaWiki opts lst =
 
 -- | Convert Pandoc inline element to MediaWiki.
 inlineToMediaWiki :: WriterOptions -> Inline -> State WriterState String
+
+inlineToMediaWiki opts (Span attrs ils) = do
+  contents <- inlineListToMediaWiki opts ils
+  return $ render Nothing (tagWithAttrs "span" attrs) ++ contents ++ "</span>"
 
 inlineToMediaWiki opts (Emph lst) = do
   contents <- inlineListToMediaWiki opts lst
@@ -360,16 +372,17 @@ inlineToMediaWiki opts (Quoted DoubleQuote lst) = do
 inlineToMediaWiki opts (Cite _  lst) = inlineListToMediaWiki opts lst
 
 inlineToMediaWiki _ (Code _ str) =
-  return $ "<tt>" ++ (escapeString str) ++ "</tt>"
+  return $ "<code>" ++ (escapeString str) ++ "</code>"
 
 inlineToMediaWiki _ (Str str) = return $ escapeString str
 
 inlineToMediaWiki _ (Math _ str) = return $ "<math>" ++ str ++ "</math>"
                                  -- note:  str should NOT be escaped
 
-inlineToMediaWiki _ (RawInline "mediawiki" str) = return str
-inlineToMediaWiki _ (RawInline "html" str) = return str
-inlineToMediaWiki _ (RawInline _ _) = return ""
+inlineToMediaWiki _ (RawInline f str)
+  | f == Format "mediawiki" = return str
+  | f == Format "html"      = return str
+  | otherwise               = return ""
 
 inlineToMediaWiki _ (LineBreak) = return "<br />"
 
@@ -378,7 +391,7 @@ inlineToMediaWiki _ Space = return " "
 inlineToMediaWiki opts (Link txt (src, _)) = do
   label <- inlineListToMediaWiki opts txt
   case txt of
-     [Code _ s] | s == src -> return src
+     [Str s] | escapeURI s == src -> return src
      _  -> if isURI src
               then return $ "[" ++ src ++ " " ++ label ++ "]"
               else return $ "[[" ++ src' ++ "|" ++ label ++ "]]"

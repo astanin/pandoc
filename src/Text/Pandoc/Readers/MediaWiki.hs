@@ -42,15 +42,16 @@ import Text.Pandoc.Options
 import Text.Pandoc.Readers.HTML ( htmlTag, isBlockTag, isCommentTag )
 import Text.Pandoc.XML ( fromEntities )
 import Text.Pandoc.Parsing hiding ( nested )
-import Text.Pandoc.Generic ( bottomUp )
-import Text.Pandoc.Shared ( stripTrailingNewlines, safeRead )
+import Text.Pandoc.Walk ( walk )
+import Text.Pandoc.Shared ( stripTrailingNewlines, safeRead, stringify )
 import Data.Monoid (mconcat, mempty)
 import Control.Applicative ((<$>), (<*), (*>), (<$))
 import Control.Monad
 import Data.List (intersperse, intercalate, isPrefixOf )
 import Text.HTML.TagSoup
 import Data.Sequence (viewl, ViewL(..), (<|))
-import Data.Char (isDigit)
+import qualified Data.Foldable as F
+import Data.Char (isDigit, isSpace)
 
 -- | Read mediawiki from an input string and return a Pandoc document.
 readMediaWiki :: ReaderOptions -- ^ Reader options
@@ -90,7 +91,7 @@ nested p = do
   return res
 
 specialChars :: [Char]
-specialChars = "'[]<=&*{}|\""
+specialChars = "'[]<=&*{}|\":\\"
 
 spaceChars :: [Char]
 spaceChars = " \n\t"
@@ -139,8 +140,7 @@ charsInTags tag = try $ do
   (_,raw) <- htmlTag (~== TagOpen tag [])
   if '/' `elem` raw   -- self-closing tag
      then return ""
-     else innerText . parseTags <$>
-            manyTill anyChar (htmlTag (~== TagClose tag))
+     else manyTill anyChar (htmlTag (~== TagClose tag))
 
 --
 -- main parser
@@ -176,13 +176,17 @@ block =  mempty <$ skipMany1 blankline
      <|> para
 
 para :: MWParser Blocks
-para = B.para . trimInlines . mconcat <$> many1 inline
+para = do
+  contents <- trimInlines . mconcat <$> many1 inline
+  if F.all (==Space) contents
+     then return mempty
+     else return $ B.para contents
 
 table :: MWParser Blocks
 table = do
   tableStart
-  styles <- manyTill anyChar newline
-  let tableWidth = case lookup "width" $ parseAttrs styles of
+  styles <- option [] parseAttrs <* blankline
+  let tableWidth = case lookup "width" styles of
                          Just w  -> maybe 1.0 id $ parseWidth w
                          Nothing -> 1.0
   caption <- option mempty tableCaption
@@ -205,32 +209,31 @@ table = do
                           else (replicate cols mempty, hdr:rows')
   return $ B.table caption cellspecs headers rows
 
-parseAttrs :: String -> [(String,String)]
-parseAttrs s = case parse (many parseAttr) "attributes" s of
-                    Right r -> r
-                    Left _  -> []
+parseAttrs :: MWParser [(String,String)]
+parseAttrs = many1 parseAttr
 
-parseAttr :: Parser String () (String, String)
+parseAttr :: MWParser (String, String)
 parseAttr = try $ do
   skipMany spaceChar
   k <- many1 letter
   char '='
   char '"'
-  v <- many1Till anyChar (char '"')
+  v <- many1Till (satisfy (/='\n')) (char '"')
   return (k,v)
 
 tableStart :: MWParser ()
-tableStart = try $ guardColumnOne *> sym "{|"
+tableStart = try $ guardColumnOne *> skipSpaces *> sym "{|"
 
 tableEnd :: MWParser ()
-tableEnd = try $ guardColumnOne *> sym "|}" <* blanklines
+tableEnd = try $ guardColumnOne *> skipSpaces *> sym "|}"
 
 rowsep :: MWParser ()
-rowsep = try $ guardColumnOne *> sym "|-" <* blanklines
+rowsep = try $ guardColumnOne *> skipSpaces *> sym "|-" <*
+               optional parseAttr <* blanklines
 
 cellsep :: MWParser ()
 cellsep = try $
-             (guardColumnOne <*
+             (guardColumnOne *> skipSpaces <*
                  (  (char '|' <* notFollowedBy (oneOf "-}+"))
                 <|> (char '!')
                  )
@@ -241,10 +244,10 @@ cellsep = try $
 tableCaption :: MWParser Inlines
 tableCaption = try $ do
   guardColumnOne
+  skipSpaces
   sym "|+"
-  skipMany spaceChar
-  res <- manyTill anyChar newline >>= parseFromString (many inline)
-  return $ trimInlines $ mconcat res
+  optional (try $ parseAttr *> skipSpaces *> char '|' *> skipSpaces)
+  (trimInlines . mconcat) <$> many (notFollowedBy (cellsep <|> rowsep) *> inline)
 
 tableRow :: MWParser [((Alignment, Double), Blocks)]
 tableRow = try $ many tableCell
@@ -253,8 +256,8 @@ tableCell :: MWParser ((Alignment, Double), Blocks)
 tableCell = try $ do
   cellsep
   skipMany spaceChar
-  attrs <- option [] $ try $ parseAttrs <$>
-       manyTill (satisfy (/='\n')) (char '|' <* notFollowedBy (char '|'))
+  attrs <- option [] $ try $ parseAttrs <* skipSpaces <* char '|' <*
+                                 notFollowedBy (char '|')
   skipMany spaceChar
   ls <- concat <$> many (notFollowedBy (cellsep <|> rowsep <|> tableEnd) *>
                      ((snd <$> withRaw table) <|> count 1 anyChar))
@@ -330,10 +333,16 @@ preformatted = try $ do
                 lines . fromEntities . map spToNbsp <$> try
                   (htmlTag (~== TagOpen "nowiki" []) *>
                    manyTill anyChar (htmlTag (~== TagClose "nowiki")))
-  let inline' = whitespace' <|> endline' <|> nowiki' <|> inline
+  let inline' = whitespace' <|> endline' <|> nowiki'
+                  <|> (try $ notFollowedBy newline *> inline)
   let strToCode (Str s) = Code ("",[],[]) s
       strToCode  x      = x
-  B.para . bottomUp strToCode . mconcat <$> many1 inline'
+  contents <- mconcat <$> many1 inline'
+  let spacesStr (Str xs) = all isSpace xs
+      spacesStr _        = False
+  if F.all spacesStr contents
+     then return mempty
+     else return $ B.para $ walk strToCode contents
 
 header :: MWParser Blocks
 header = try $ do
@@ -371,12 +380,13 @@ defListItem = try $ do
   terms <- mconcat . intersperse B.linebreak <$> many defListTerm
   -- we allow dd with no dt, or dt with no dd
   defs  <- if B.isNull terms
-              then many1 $ listItem ':'
-              else many $ listItem ':'
+              then notFollowedBy (try $ string ":<math>") *>
+                       many1 (listItem ':')
+              else many (listItem ':')
   return (terms, defs)
 
 defListTerm  :: MWParser Inlines
-defListTerm = char ';' >> skipMany spaceChar >> manyTill anyChar newline >>=
+defListTerm = char ';' >> skipMany spaceChar >> anyLine >>=
   parseFromString (trimInlines . mconcat <$> many inline)
 
 listStart :: Char -> MWParser ()
@@ -453,6 +463,7 @@ inline =  whitespace
       <|> image
       <|> internalLink
       <|> externalLink
+      <|> math
       <|> inlineTag
       <|> B.singleton <$> charRef
       <|> inlineHtml
@@ -462,6 +473,16 @@ inline =  whitespace
 
 str :: MWParser Inlines
 str = B.str <$> many1 (noneOf $ specialChars ++ spaceChars)
+
+math :: MWParser Inlines
+math = (B.displayMath <$> try (char ':' >> charsInTags "math"))
+   <|> (B.math <$> charsInTags "math")
+   <|> (B.displayMath <$> try (dmStart *> manyTill anyChar dmEnd))
+   <|> (B.math <$> try (mStart *> manyTill (satisfy (/='\n')) mEnd))
+ where dmStart = string "\\["
+       dmEnd   = try (string "\\]")
+       mStart  = string "\\("
+       mEnd    = try (string "\\)")
 
 variable :: MWParser String
 variable = try $ do
@@ -486,7 +507,6 @@ inlineTag = do
        TagOpen "del" _ -> B.strikeout <$> inlinesInTags "del"
        TagOpen "sub" _ -> B.subscript <$> inlinesInTags "sub"
        TagOpen "sup" _ -> B.superscript <$> inlinesInTags "sup"
-       TagOpen "math" _ -> B.math <$> charsInTags "math"
        TagOpen "code" _ -> B.code <$> charsInTags "code"
        TagOpen "tt" _ -> B.code <$> charsInTags "tt"
        TagOpen "hask" _ -> B.codeWith ("",["haskell"],[]) <$> charsInTags "hask"
@@ -504,7 +524,8 @@ whitespace = B.space <$ (skipMany1 spaceChar <|> endline <|> htmlComment)
 
 endline :: MWParser ()
 endline = () <$ try (newline <*
-                     notFollowedBy blankline <*
+                     notFollowedBy spaceChar <*
+                     notFollowedBy newline <*
                      notFollowedBy' hrule <*
                      notFollowedBy tableStart <*
                      notFollowedBy' header <*
@@ -513,12 +534,12 @@ endline = () <$ try (newline <*
 image :: MWParser Inlines
 image = try $ do
   sym "[["
-  sym "File:"
+  sym "File:" <|> sym "Image:"
   fname <- many1 (noneOf "|]")
   _ <- many (try $ char '|' *> imageOption)
   caption <-   (B.str fname <$ sym "]]")
            <|> try (char '|' *> (mconcat <$> manyTill inline (sym "]]")))
-  return $ B.image fname "image" caption
+  return $ B.image fname ("fig:" ++ stringify caption) caption
 
 imageOption :: MWParser String
 imageOption =

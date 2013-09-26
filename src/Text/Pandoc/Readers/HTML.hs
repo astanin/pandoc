@@ -39,7 +39,7 @@ module Text.Pandoc.Readers.HTML ( readHtml
 import Text.HTML.TagSoup
 import Text.HTML.TagSoup.Match
 import Text.Pandoc.Definition
-import Text.Pandoc.Builder (text, toList)
+import qualified Text.Pandoc.Builder as B
 import Text.Pandoc.Shared
 import Text.Pandoc.Options
 import Text.Pandoc.Parsing
@@ -47,6 +47,7 @@ import Data.Maybe ( fromMaybe, isJust )
 import Data.List ( intercalate )
 import Data.Char ( isDigit )
 import Control.Monad ( liftM, guard, when, mzero )
+import Control.Applicative ( (<$>), (<$), (<*) )
 
 isSpace :: Char -> Bool
 isSpace ' '  = True
@@ -58,29 +59,26 @@ isSpace _    = False
 readHtml :: ReaderOptions -- ^ Reader options
          -> String        -- ^ String to parse (assumes @'\n'@ line endings)
          -> Pandoc
-readHtml opts inp = Pandoc meta blocks
-  where blocks  = readWith parseBody def{ stateOptions = opts } rest
-        tags    = canonicalizeTags $
+readHtml opts inp =
+  case runParser parseDoc def{ stateOptions = opts } "source" tags of
+          Left err'    -> error $ "\nError at " ++ show  err'
+          Right result -> result
+    where tags = canonicalizeTags $
                    parseTagsOptions parseOptions{ optTagPosition = True } inp
-        hasHeader = any (~== TagOpen "head" []) tags
-        (meta, rest) = if hasHeader
-                          then parseHeader tags
-                          else (Meta [] [] [], tags)
+          parseDoc = do
+             blocks <- (fixPlains False . concat) <$> manyTill block eof
+             meta <- stateMeta <$> getState
+             return $ Pandoc meta blocks
 
 type TagParser = Parser [Tag String] ParserState
 
--- TODO - fix this - not every header has a title tag
-parseHeader :: [Tag String] -> (Meta, [Tag String])
-parseHeader tags = (Meta{docTitle = tit'', docAuthors = [], docDate = []}, rest)
-  where (tit,_) = break (~== TagClose "title") $ drop 1 $
-                   dropWhile (\t -> not $ t ~== TagOpen "title" []) tags
-        tit' = concatMap fromTagText $ filter isTagText tit
-        tit'' = normalizeSpaces $ toList $ text tit'
-        rest  = drop 1 $ dropWhile (\t -> not $ t ~== TagClose "head" ||
-                                                t ~== TagOpen "body" []) tags
+pBody :: TagParser [Block]
+pBody = pInTags "body" block
 
-parseBody :: TagParser [Block]
-parseBody = liftM (fixPlains False . concat) $ manyTill block eof
+pHead :: TagParser [Block]
+pHead = pInTags "head" $ pTitle <|> ([] <$ pAnyTag)
+  where pTitle = pInTags "title" inline >>= setTitle . normalizeSpaces
+        setTitle t = [] <$ (updateState $ B.setMeta "title" (B.fromList t))
 
 block :: TagParser [Block]
 block = choice
@@ -90,7 +88,9 @@ block = choice
             , pCodeBlock
             , pList
             , pHrule
-            , pSimpleTable
+            , pTable
+            , pHead
+            , pBody
             , pPlain
             , pRawHtmlBlock
             ]
@@ -160,7 +160,7 @@ fixPlains inList bs = if any isParaish bs
                          else bs
   where isParaish (Para _) = True
         isParaish (CodeBlock _ _) = True
-        isParaish (Header _ _) = True
+        isParaish (Header _ _ _) = True
         isParaish (BlockQuote _) = True
         isParaish (BulletList _) = not inList
         isParaish (OrderedList _ _) = not inList
@@ -182,7 +182,7 @@ pRawHtmlBlock = do
   raw <- pHtmlBlock "script" <|> pHtmlBlock "style" <|> pRawTag
   parseRaw <- getOption readerParseRaw
   if parseRaw && not (null raw)
-     then return [RawBlock "html" raw]
+     then return [RawBlock (Format "html") raw]
      else return []
 
 pHtmlBlock :: String -> TagParser String
@@ -199,36 +199,69 @@ pHeader = try $ do
   let bodyTitle = TagOpen tagtype attr ~== TagOpen "h1" [("class","title")]
   let level = read (drop 1 tagtype)
   contents <- liftM concat $ manyTill inline (pCloses tagtype <|> eof)
+  let ident = maybe "" id $ lookup "id" attr
+  let classes = maybe [] words $ lookup "class" attr
+  let keyvals = [(k,v) | (k,v) <- attr, k /= "class", k /= "id"]
   return $ if bodyTitle
               then []  -- skip a representation of the title in the body
-              else [Header level $ normalizeSpaces contents]
+              else [Header level (ident, classes, keyvals) $
+                    normalizeSpaces contents]
 
 pHrule :: TagParser [Block]
 pHrule = do
   pSelfClosing (=="hr") (const True)
   return [HorizontalRule]
 
-pSimpleTable :: TagParser [Block]
-pSimpleTable = try $ do
+pTable :: TagParser [Block]
+pTable = try $ do
   TagOpen _ _ <- pSatisfy (~== TagOpen "table" [])
   skipMany pBlank
   caption <- option [] $ pInTags "caption" inline >>~ skipMany pBlank
-  skipMany $ pInTags "col" block >> skipMany pBlank
+  -- TODO actually read these and take width information from them
+  widths' <- pColgroup <|> many pCol
   head' <- option [] $ pOptInTag "thead" $ pInTags "tr" (pCell "th")
   skipMany pBlank
   rows <- pOptInTag "tbody"
           $ many1 $ try $ skipMany pBlank >> pInTags "tr" (pCell "td")
   skipMany pBlank
   TagClose _ <- pSatisfy (~== TagClose "table")
-  let cols = maximum $ map length rows
+  let isSinglePlain []        = True
+      isSinglePlain [Plain _] = True
+      isSinglePlain _         = False
+  let isSimple = all isSinglePlain $ concat (head':rows)
+  let cols = length $ if null head'
+                         then head rows
+                         else head'
+  -- fail if there are colspans or rowspans
+  guard $ all (\r -> length r == cols) rows
   let aligns = replicate cols AlignLeft
-  let widths = replicate cols 0
+  let widths = if null widths'
+                  then if isSimple
+                       then replicate cols 0
+                       else replicate cols (1.0 / fromIntegral cols)
+                  else widths'
   return [Table caption aligns widths head' rows]
+
+pCol :: TagParser Double
+pCol = try $ do
+  TagOpen _ attribs <- pSatisfy (~== TagOpen "col" [])
+  optional $ pSatisfy (~== TagClose "col")
+  skipMany pBlank
+  return $ case lookup "width" attribs of
+           Just x | not (null x) && last x == '%' ->
+             maybe 0.0 id $ safeRead ('0':'.':init x)
+           _ -> 0.0
+
+pColgroup :: TagParser [Double]
+pColgroup = try $ do
+  pSatisfy (~== TagOpen "colgroup" [])
+  skipMany pBlank
+  manyTill pCol (pCloses "colgroup" <|> eof) <* skipMany pBlank
 
 pCell :: String -> TagParser [TableCell]
 pCell celltype = try $ do
   skipMany pBlank
-  res <- pInTags celltype pPlain
+  res <- pInTags celltype block
   skipMany pBlank
   return [res]
 
@@ -358,7 +391,7 @@ pImage = do
   let url = fromAttrib "src" tag
   let title = fromAttrib "title" tag
   let alt = fromAttrib "alt" tag
-  return [Image (toList $ text alt) (escapeURI url, title)]
+  return [Image (B.toList $ B.text alt) (escapeURI url, title)]
 
 pCode :: TagParser [Inline]
 pCode = try $ do
@@ -375,7 +408,7 @@ pRawHtmlInline = do
   result <- pSatisfy (tagComment (const True)) <|> pSatisfy isInlineTag
   parseRaw <- getOption readerParseRaw
   if parseRaw
-     then return [RawInline "html" $ renderTags' [result]]
+     then return [RawInline (Format "html") $ renderTags' [result]]
      else return []
 
 pInlinesInTags :: String -> ([Inline] -> Inline)
@@ -508,12 +541,15 @@ inlineHtmlTags = ["a", "abbr", "acronym", "b", "basefont", "bdo", "big",
 -}
 
 blockHtmlTags :: [String]
-blockHtmlTags = ["address", "blockquote", "body", "center", "dir", "div",
-                 "dl", "fieldset", "form", "h1", "h2", "h3", "h4",
-                 "h5", "h6", "head", "hr", "html", "isindex", "menu",
-                 "noframes", "noscript", "ol", "p", "pre", "table", "ul", "dd",
+blockHtmlTags = ["address", "article", "aside", "blockquote", "body", "button", "canvas",
+                 "caption", "center", "col", "colgroup", "dd", "dir", "div",
+                 "dl", "dt", "embed", "fieldset", "figcaption", "figure", "footer",
+                 "form", "h1", "h2", "h3", "h4",
+                 "h5", "h6", "head", "header", "hgroup", "hr", "html", "isindex", "map", "menu",
+                 "noframes", "noscript", "object", "ol", "output", "p", "pre", "progress",
+                 "section", "table", "tbody", "textarea", "thead", "tfoot", "ul", "dd",
                  "dt", "frameset", "li", "tbody", "td", "tfoot",
-                 "th", "thead", "tr", "script", "style"]
+                 "th", "thead", "tr", "script", "style", "video"]
 
 -- We want to allow raw docbook in markdown documents, so we
 -- include docbook block tags here too.

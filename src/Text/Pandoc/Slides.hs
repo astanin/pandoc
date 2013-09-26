@@ -26,7 +26,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
    Portability : portable
 
 Utility functions for splitting documents into slides for slide
-show formats (dzslides, s5, slidy, slideous, beamer).
+show formats (dzslides, revealjs, s5, slidy, slideous, beamer).
 -}
 module Text.Pandoc.Slides ( getSlideLevel, prepSlides ) where
 import Text.Pandoc.Definition
@@ -35,24 +35,29 @@ import Text.Pandoc.Definition
 -- level that occurs before a non-header/non-hrule in the blocks).
 getSlideLevel :: [Block] -> Int
 getSlideLevel = go 6
-  where go least (Header n _ : x : xs)
+  where go least (Header n _ _ : x : xs)
                  | n < least && nonHOrHR x = go n xs
                  | otherwise               = go least (x:xs)
         go least (_ : xs) = go least xs
         go least [] = least
-        nonHOrHR (Header _ _) = False
+        nonHOrHR (Header _ _ _) = False
         nonHOrHR (HorizontalRule) = False
         nonHOrHR _ = True
 
 -- | Prepare a block list to be passed to hierarchicalize.
 prepSlides :: Int -> [Block] -> [Block]
-prepSlides slideLevel = ensureStartWithH . splitHrule
-  where splitHrule (HorizontalRule : Header n xs : ys)
-                       | n == slideLevel = Header slideLevel xs : splitHrule ys
-        splitHrule (HorizontalRule : xs) = Header slideLevel [Str "\0"] :
+prepSlides slideLevel = ensureStartWithH . splitHrule . extractRefsHeader
+  where splitHrule (HorizontalRule : Header n attr xs : ys)
+                       | n == slideLevel = Header slideLevel attr xs : splitHrule ys
+        splitHrule (HorizontalRule : xs) = Header slideLevel nullAttr [Str "\0"] :
                                            splitHrule xs
         splitHrule (x : xs)              = x : splitHrule xs
         splitHrule []                    = []
-        ensureStartWithH bs@(Header n _:_)
+        extractRefsHeader bs             =
+          case reverse bs of
+               (Div (_,["references"],_) (Header n attrs xs : ys) : zs)
+                 -> reverse zs ++ (Header n attrs xs : ys)
+               _ -> bs
+        ensureStartWithH bs@(Header n _ _:_)
                        | n <= slideLevel = bs
-        ensureStartWithH bs              = Header slideLevel [Str "\0"] : bs
+        ensureStartWithH bs              = Header slideLevel nullAttr [Str "\0"] : bs

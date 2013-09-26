@@ -1,3 +1,4 @@
+{-# LANGUAGE OverloadedStrings #-}
 {-
 Copyright (C) 2006-2010 John MacFarlane <jgm@berkeley.edu>
 
@@ -31,6 +32,7 @@ module Text.Pandoc.Readers.RST (
                                 readRST
                                ) where
 import Text.Pandoc.Definition
+import Text.Pandoc.Builder (setMeta, fromList)
 import Text.Pandoc.Shared
 import Text.Pandoc.Parsing
 import Text.Pandoc.Options
@@ -39,7 +41,6 @@ import Data.List ( findIndex, intersperse, intercalate,
                    transpose, sort, deleteFirstsBy, isSuffixOf )
 import qualified Data.Map as M
 import Text.Printf ( printf )
-import Data.Maybe ( catMaybes )
 import Control.Applicative ((<$>), (<$), (<*), (*>))
 import Text.Pandoc.Builder (Inlines, Blocks, trimInlines, (<>))
 import qualified Text.Pandoc.Builder as B
@@ -74,29 +75,64 @@ specialChars = "\\`|*_<>$:/[]{}()-.\"'\8216\8217\8220\8221"
 --
 
 isHeader :: Int -> Block -> Bool
-isHeader n (Header x _) = x == n
-isHeader _ _            = False
+isHeader n (Header x _ _) = x == n
+isHeader _ _              = False
 
 -- | Promote all headers in a list of blocks.  (Part of
 -- title transformation for RST.)
 promoteHeaders :: Int -> [Block] -> [Block]
-promoteHeaders num ((Header level text):rest) =
-    (Header (level - num) text):(promoteHeaders num rest)
+promoteHeaders num ((Header level attr text):rest) =
+    (Header (level - num) attr text):(promoteHeaders num rest)
 promoteHeaders num (other:rest) = other:(promoteHeaders num rest)
 promoteHeaders _   [] = []
 
 -- | If list of blocks starts with a header (or a header and subheader)
 -- of level that are not found elsewhere, return it as a title and
--- promote all the other headers.
-titleTransform :: [Block]              -- ^ list of blocks
-               -> ([Block], [Inline])  -- ^ modified list of blocks, title
-titleTransform ((Header 1 head1):(Header 2 head2):rest) |
-   not (any (isHeader 1) rest || any (isHeader 2) rest) =  -- both title & subtitle
-   (promoteHeaders 2 rest, head1 ++ [Str ":", Space] ++ head2)
-titleTransform ((Header 1 head1):rest) |
-   not (any (isHeader 1) rest) =  -- title, no subtitle
-   (promoteHeaders 1 rest, head1)
-titleTransform blocks = (blocks, [])
+-- promote all the other headers.  Also process a definition list right
+-- after the title block as metadata.
+titleTransform :: ([Block], Meta)  -- ^ list of blocks, metadata
+               -> ([Block], Meta)  -- ^ modified list of blocks, metadata
+titleTransform (bs, meta) =
+  let (bs', meta') =
+       case bs of
+          ((Header 1 _ head1):(Header 2 _ head2):rest)
+           | not (any (isHeader 1) rest || any (isHeader 2) rest) -> -- tit/sub
+            (promoteHeaders 2 rest, setMeta "title" (fromList head1) $
+              setMeta "subtitle" (fromList head2) meta)
+          ((Header 1 _ head1):rest)
+           | not (any (isHeader 1) rest) -> -- title only
+            (promoteHeaders 1 rest,
+                setMeta "title" (fromList head1) meta)
+          _ -> (bs, meta)
+  in   case bs' of
+          (DefinitionList ds : rest) ->
+            (rest, metaFromDefList ds meta')
+          _ -> (bs', meta')
+
+metaFromDefList :: [([Inline], [[Block]])] -> Meta -> Meta
+metaFromDefList ds meta = adjustAuthors $ foldr f meta ds
+ where f (k,v) = setMeta (map toLower $ stringify k) (mconcat $ map fromList v)
+       adjustAuthors (Meta metamap) = Meta $ M.adjust toPlain "author"
+                                           $ M.adjust toPlain "date"
+                                           $ M.adjust toPlain "title"
+                                           $ M.adjust splitAuthors "authors"
+                                           $ metamap
+       toPlain (MetaBlocks [Para xs]) = MetaInlines xs
+       toPlain x                      = x
+       splitAuthors (MetaBlocks [Para xs]) = MetaList $ map MetaInlines
+                                                      $ splitAuthors' xs
+       splitAuthors x                 = x
+       splitAuthors'                  = map normalizeSpaces .
+                                         splitOnSemi . concatMap factorSemi
+       splitOnSemi                    = splitBy (==Str ";")
+       factorSemi (Str [])            = []
+       factorSemi (Str s)             = case break (==';') s of
+                                             (xs,[]) -> [Str xs]
+                                             (xs,';':ys) -> Str xs : Str ";" :
+                                                factorSemi (Str ys)
+                                             (xs,ys) -> Str xs :
+                                                factorSemi (Str ys)
+       factorSemi x                   = [x]
 
 parseRST :: RSTParser Pandoc
 parseRST = do
@@ -114,14 +150,12 @@ parseRST = do
   -- now parse it for real...
   blocks <- B.toList <$> parseBlocks
   standalone <- getOption readerStandalone
-  let (blocks', title) = if standalone
-                            then titleTransform blocks
-                            else (blocks, [])
   state <- getState
-  let authors = stateAuthors state
-  let date = stateDate state
-  let title' = if null title then stateTitle state else title
-  return $ Pandoc (Meta title' authors date) blocks'
+  let meta = stateMeta state
+  let (blocks', meta') = if standalone
+                            then titleTransform (blocks, meta)
+                            else (blocks, meta)
+  return $ Pandoc meta' blocks'
 
 --
 -- parsing blocks
@@ -143,6 +177,7 @@ block = choice [ codeBlock
                , list
                , lhsCodeBlock
                , para
+               , mempty <$ blanklines
                ] <?> "block"
 
 --
@@ -155,45 +190,26 @@ rawFieldListItem indent = try $ do
   char ':'
   name <- many1Till (noneOf "\n") (char ':')
   (() <$ lookAhead newline) <|> skipMany1 spaceChar
-  first <- manyTill anyChar newline
+  first <- anyLine
   rest <- option "" $ try $ do lookAhead (string indent >> spaceChar)
                                indentedBlock
   let raw = (if null first then "" else (first ++ "\n")) ++ rest ++ "\n"
   return (name, raw)
 
 fieldListItem :: String
-              -> RSTParser (Maybe (Inlines, [Blocks]))
+              -> RSTParser (Inlines, [Blocks])
 fieldListItem indent = try $ do
   (name, raw) <- rawFieldListItem indent
   let term = B.str name
   contents <- parseFromString parseBlocks raw
   optional blanklines
-  case (name, B.toList contents) of
-       ("Author", x) -> do
-           updateState $ \st ->
-             st{ stateAuthors = stateAuthors st ++ [extractContents x] }
-           return Nothing
-       ("Authors", [BulletList auths]) -> do
-           updateState $ \st -> st{ stateAuthors = map extractContents auths }
-           return Nothing
-       ("Date", x) -> do
-           updateState $ \st -> st{ stateDate = extractContents x }
-           return Nothing
-       ("Title", x) -> do
-           updateState $ \st -> st{ stateTitle = extractContents x }
-           return Nothing
-       _            -> return $ Just (term, [contents])
-
-extractContents :: [Block] -> [Inline]
-extractContents [Plain auth] = auth
-extractContents [Para auth]  = auth
-extractContents _            = []
+  return (term, [contents])
 
 fieldList :: RSTParser Blocks
 fieldList = try $ do
   indent <- lookAhead $ many spaceChar
   items <- many1 $ fieldListItem indent
-  case catMaybes items of
+  case items of
      []     -> return mempty
      items' -> return $ B.definitionList items'
 
@@ -201,22 +217,12 @@ fieldList = try $ do
 -- line block
 --
 
-lineBlockLine :: RSTParser Inlines
-lineBlockLine = try $ do
-  char '|'
-  char ' ' <|> lookAhead (char '\n')
-  white <- many spaceChar
-  line <- many $ (notFollowedBy newline >> inline) <|> (try $ endline >>~ char ' ')
-  optional endline
-  return $ if null white
-              then mconcat line
-              else B.str white <> mconcat line
-
 lineBlock :: RSTParser Blocks
 lineBlock = try $ do
-  lines' <- many1 lineBlockLine
-  blanklines
-  return $ B.para (mconcat $ intersperse B.linebreak lines')
+  lines' <- lineBlockLines
+  lines'' <- mapM (parseFromString
+                   (trimInlines . mconcat <$> many inline)) lines'
+  return $ B.para (mconcat $ intersperse B.linebreak lines'')
 
 --
 -- paragraph block
@@ -269,7 +275,8 @@ doubleHeader = try $ do
         Just ind -> (headerTable, ind + 1)
         Nothing -> (headerTable ++ [DoubleHeader c], (length headerTable) + 1)
   setState (state { stateHeaderTable = headerTable' })
-  return $ B.header level txt
+  attr <- registerHeader nullAttr txt
+  return $ B.headerWith attr level txt
 
 -- a header with line on the bottom only
 singleHeader :: RSTParser Blocks
@@ -289,7 +296,8 @@ singleHeader = try $ do
         Just ind -> (headerTable, ind + 1)
         Nothing -> (headerTable ++ [SingleHeader c], (length headerTable) + 1)
   setState (state { stateHeaderTable = headerTable' })
-  return $ B.header level txt
+  attr <- registerHeader nullAttr txt
+  return $ B.headerWith attr level txt
 
 --
 -- hrule block
@@ -312,7 +320,7 @@ hrule = try $ do
 indentedLine :: String -> Parser [Char] st [Char]
 indentedLine indents = try $ do
   string indents
-  manyTill anyChar newline
+  anyLine
 
 -- one or more indented lines, possibly separated by blank lines.
 -- any amount of indentation will work.
@@ -349,7 +357,7 @@ lhsCodeBlock = try $ do
          $ intercalate "\n" lns'
 
 birdTrackLine :: Parser [Char] st [Char]
-birdTrackLine = char '>' >> manyTill anyChar newline
+birdTrackLine = char '>' >> anyLine
 
 --
 -- block quotes
@@ -404,7 +412,7 @@ listLine :: Int -> RSTParser [Char]
 listLine markerLength = try $ do
   notFollowedBy blankline
   indentWith markerLength
-  line <- manyTill anyChar newline
+  line <- anyLine
   return $ line ++ "\n"
 
 -- indent by specified number of spaces (or equiv. tabs)
@@ -421,7 +429,7 @@ rawListItem :: RSTParser Int
             -> RSTParser (Int, [Char])
 rawListItem start = try $ do
   markerLength <- start
-  firstLine <- manyTill anyChar newline
+  firstLine <- anyLine
   restLines <- many (listLine markerLength)
   return (markerLength, (firstLine ++ "\n" ++ (concat restLines)))
 
@@ -450,7 +458,12 @@ listItem start = try $ do
   -- parse the extracted block, which may itself contain block elements
   parsed <- parseFromString parseBlocks $ concat (first:rest) ++ blanks
   updateState (\st -> st {stateParserContext = oldContext})
-  return parsed
+  return $ case B.toList parsed of
+                [Para xs] -> B.singleton $ Plain xs
+                [Para xs, BulletList ys] -> B.fromList [Plain xs, BulletList ys]
+                [Para xs, OrderedList s ys] -> B.fromList [Plain xs, OrderedList s ys]
+                [Para xs, DefinitionList ys] -> B.fromList [Plain xs, DefinitionList ys]
+                _         -> parsed
 
 orderedList :: RSTParser Blocks
 orderedList = try $ do
@@ -620,7 +633,7 @@ codeblock numberLines lang body =
           kvs     = case numberLines of
                           Just "" -> []
                           Nothing -> []
-                          Just n  -> [("startFrom",n)]
+                          Just n  -> [("startFrom",trim n)]
 
 ---
 --- note block
@@ -972,6 +985,7 @@ explicitLink = try $ do
   src <- manyTill (noneOf ">\n") (char '>')
   skipSpaces
   string "`_"
+  optional $ char '_' -- anonymous form
   return $ B.link (escapeURI $ trim src) "" label'
 
 referenceLink :: RSTParser Inlines

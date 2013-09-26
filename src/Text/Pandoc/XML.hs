@@ -27,8 +27,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 Functions for escaping and formatting XML.
 -}
-module Text.Pandoc.XML ( stripTags,
-                         escapeCharForXML,
+module Text.Pandoc.XML ( escapeCharForXML,
                          escapeStringForXML,
                          inTags,
                          selfClosingTag,
@@ -39,17 +38,7 @@ module Text.Pandoc.XML ( stripTags,
 
 import Text.Pandoc.Pretty
 import Data.Char (ord, isAscii, isSpace)
-import Text.HTML.TagSoup.Entity (lookupEntity)
-
--- | Remove everything between <...>
-stripTags :: String -> String
-stripTags ('<':xs) =
-  let (_,rest) = break (=='>') xs
-  in  if null rest
-         then ""
-         else stripTags (tail rest) -- leave off >
-stripTags (x:xs) = x : stripTags xs
-stripTags [] = []
+import Text.Pandoc.Compat.TagSoupEntity (lookupEntity)
 
 -- | Escape one character as needed for XML.
 escapeCharForXML :: Char -> String
@@ -64,11 +53,18 @@ escapeCharForXML x = case x of
 escapeStringForXML :: String -> String
 escapeStringForXML = concatMap escapeCharForXML
 
+-- | Escape newline characters as &#10;
+escapeNls :: String -> String
+escapeNls (x:xs)
+  | x == '\n' = "&#10;" ++ escapeNls xs
+  | otherwise = x : escapeNls xs
+escapeNls []     = []
+
 -- | Return a text object with a string of formatted XML attributes.
 attributeList :: [(String, String)] -> Doc
 attributeList = hcat . map
   (\(a, b) -> text (' ' : escapeStringForXML a ++ "=\"" ++
-  escapeStringForXML b ++ "\""))
+  escapeNls (escapeStringForXML b) ++ "\""))
 
 -- | Put the supplied contents between start and end tags of tagType,
 --   with specified attributes and (if specified) indentation.

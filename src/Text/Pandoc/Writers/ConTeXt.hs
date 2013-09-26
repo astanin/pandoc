@@ -31,13 +31,14 @@ Conversion of 'Pandoc' format into ConTeXt.
 module Text.Pandoc.Writers.ConTeXt ( writeConTeXt ) where
 import Text.Pandoc.Definition
 import Text.Pandoc.Shared
+import Text.Pandoc.Writers.Shared
 import Text.Pandoc.Options
-import Text.Pandoc.Generic (queryWith)
+import Text.Pandoc.Walk (query)
 import Text.Printf ( printf )
-import Data.List ( intercalate )
+import Data.List ( intercalate, isPrefixOf )
 import Control.Monad.State
 import Text.Pandoc.Pretty
-import Text.Pandoc.Templates ( renderTemplate )
+import Text.Pandoc.Templates ( renderTemplate' )
 import Network.URI ( isURI, unEscapeString )
 
 data WriterState =
@@ -46,8 +47,8 @@ data WriterState =
               , stOptions          :: WriterOptions -- writer options
               }
 
-orderedListStyles :: [[Char]]
-orderedListStyles = cycle ["[n]","[a]", "[r]", "[g]"]
+orderedListStyles :: [Char]
+orderedListStyles = cycle "narg"
 
 -- | Convert Pandoc to ConTeXt.
 writeConTeXt :: WriterOptions -> Pandoc -> String
@@ -59,30 +60,31 @@ writeConTeXt options document =
   in evalState (pandocToConTeXt options document) defaultWriterState
 
 pandocToConTeXt :: WriterOptions -> Pandoc -> State WriterState String
-pandocToConTeXt options (Pandoc (Meta title authors date) blocks) = do
+pandocToConTeXt options (Pandoc meta blocks) = do
   let colwidth = if writerWrapText options
                     then Just $ writerColumns options
                     else Nothing
-  titletext <- if null title
-                  then return ""
-                  else liftM (render colwidth) $ inlineListToConTeXt title
-  authorstext <- mapM (liftM (render colwidth) . inlineListToConTeXt) authors
-  datetext <-  if null date
-                  then return ""
-                  else liftM (render colwidth) $ inlineListToConTeXt date
+  metadata <- metaToJSON options
+              (fmap (render colwidth) . blockListToConTeXt)
+              (fmap (render colwidth) . inlineListToConTeXt)
+              meta
   body <- mapM (elementToConTeXt options) $ hierarchicalize blocks
   let main = (render colwidth . vcat) body
-  let context  = writerVariables options ++
-                 [ ("toc", if writerTableOfContents options then "yes" else "")
-                 , ("body", main)
-                 , ("title", titletext)
-                 , ("date", datetext) ] ++
-                 [ ("number-sections", "yes") | writerNumberSections options ] ++
-                 [ ("mainlang", maybe "" (reverse . takeWhile (/=',') . reverse)
-                                (lookup "lang" $ writerVariables options)) ] ++
-                 [ ("author", a) | a <- authorstext ]
+  let context =   defField "toc" (writerTableOfContents options)
+                $ defField "placelist" (intercalate ("," :: String) $
+                     take (writerTOCDepth options + if writerChapters options
+                                                       then 0
+                                                       else 1)
+                       ["chapter","section","subsection","subsubsection",
+                        "subsubsubsection","subsubsubsubsection"])
+                $ defField "body" main
+                $ defField "number-sections" (writerNumberSections options)
+                $ defField "mainlang" (maybe ""
+                    (reverse . takeWhile (/=',') . reverse)
+                    (lookup "lang" $ writerVariables options))
+                $ metadata
   return $ if writerStandalone options
-              then renderTemplate context $ writerTemplate options
+              then renderTemplate' (writerTemplate options) context
               else main
 
 -- escape things as needed for ConTeXt
@@ -115,8 +117,8 @@ stringToConTeXt opts = concatMap (escapeCharForConTeXt opts)
 -- | Convert Elements to ConTeXt
 elementToConTeXt :: WriterOptions -> Element -> State WriterState Doc
 elementToConTeXt _ (Blk block) = blockToConTeXt block
-elementToConTeXt opts (Sec level _ id' title' elements) = do
-  header' <- sectionHeader id' level title'
+elementToConTeXt opts (Sec level _ attr title' elements) = do
+  header' <- sectionHeader attr level title'
   innerContents <- mapM (elementToConTeXt opts) elements
   return $ vcat (header' : innerContents)
 
@@ -125,7 +127,8 @@ blockToConTeXt :: Block
                -> State WriterState Doc
 blockToConTeXt Null = return empty
 blockToConTeXt (Plain lst) = inlineListToConTeXt lst
-blockToConTeXt (Para [Image txt (src,_)]) = do
+-- title beginning with fig: indicates that the image is a figure
+blockToConTeXt (Para [Image txt (src,'f':'i':'g':':':_)]) = do
   capt <- inlineListToConTeXt txt
   return $ blankline $$ "\\placefigure[here,nonumber]" <> braces capt <>
            braces ("\\externalfigure" <> brackets (text src)) <> blankline
@@ -140,9 +143,13 @@ blockToConTeXt (CodeBlock _ str) =
   -- blankline because \stoptyping can't have anything after it, inc. '}'
 blockToConTeXt (RawBlock "context" str) = return $ text str <> blankline
 blockToConTeXt (RawBlock _ _ ) = return empty
+blockToConTeXt (Div _ bs) = blockListToConTeXt bs
 blockToConTeXt (BulletList lst) = do
   contents <- mapM listItemToConTeXt lst
-  return $ "\\startitemize" $$ vcat contents $$ text "\\stopitemize" <> blankline
+  return $ ("\\startitemize" <> if isTightList lst
+                                   then brackets "packed"
+                                   else empty) $$
+    vcat contents $$ text "\\stopitemize" <> blankline
 blockToConTeXt (OrderedList (start, style', delim) lst) = do
     st <- get
     let level = stOrderedListLevel st
@@ -165,14 +172,15 @@ blockToConTeXt (OrderedList (start, style', delim) lst) = do
     let specs2 = if null specs2Items
                     then ""
                     else "[" ++ intercalate "," specs2Items ++ "]"
-    let style'' = case style' of
-                        DefaultStyle -> orderedListStyles !! level
-                        Decimal      -> "[n]"
-                        Example      -> "[n]"
-                        LowerRoman   -> "[r]"
-                        UpperRoman   -> "[R]"
-                        LowerAlpha   -> "[a]"
-                        UpperAlpha   -> "[A]"
+    let style'' = '[': (case style' of
+                          DefaultStyle -> orderedListStyles !! level
+                          Decimal      -> 'n'
+                          Example      -> 'n'
+                          LowerRoman   -> 'r'
+                          UpperRoman   -> 'R'
+                          LowerAlpha   -> 'a'
+                          UpperAlpha   -> 'A') :
+                       if isTightList lst then ",packed]" else "]"
     let specs = style'' ++ specs2
     return $ "\\startitemize" <> text specs $$ vcat contents $$
              "\\stopitemize" <> blankline
@@ -180,7 +188,7 @@ blockToConTeXt (DefinitionList lst) =
   liftM vcat $ mapM defListItemToConTeXt lst
 blockToConTeXt HorizontalRule = return $ "\\thinrule" <> blankline
 -- If this is ever executed, provide a default for the reference identifier.
-blockToConTeXt (Header level lst) = sectionHeader "" level lst
+blockToConTeXt (Header level attr lst) = sectionHeader attr level lst
 blockToConTeXt (Table caption aligns widths heads rows) = do
     let colDescriptor colWidth alignment = (case alignment of
                                                AlignLeft    -> 'l'
@@ -196,9 +204,11 @@ blockToConTeXt (Table caption aligns widths heads rows) = do
                   then return empty
                   else liftM ($$ "\\HL") $ tableRowToConTeXt heads
     captionText <- inlineListToConTeXt caption
-    let captionText' = if null caption then text "none" else captionText
     rows' <- mapM tableRowToConTeXt rows
-    return $ "\\placetable[here]" <> braces captionText' $$
+    return $ "\\placetable" <> brackets ("here" <> if null caption
+                                                      then ",none"
+                                                      else "")
+                            <> braces captionText $$
              "\\starttable" <> brackets (text colDescriptors) $$
              "\\HL" $$ headers $$
              vcat rows' $$ "\\HL" $$ "\\stoptable" <> blankline
@@ -274,7 +284,11 @@ inlineToConTeXt (RawInline _ _) = return empty
 inlineToConTeXt (LineBreak) = return $ text "\\crlf" <> cr
 inlineToConTeXt Space = return space
 -- autolink
-inlineToConTeXt (Link [Code _ str] (src, tit)) = inlineToConTeXt (Link
+inlineToConTeXt (Link [Str str] (src, tit))
+  | if "mailto:" `isPrefixOf` src
+    then src == escapeURI ("mailto:" ++ str)
+    else src == escapeURI str =
+  inlineToConTeXt (Link
     [RawInline "context" "\\hyphenatedurl{", Str str, RawInline "context" "}"]
     (src, tit))
 -- Handle HTML-like internal document references to sections
@@ -312,30 +326,34 @@ inlineToConTeXt (Note contents) = do
   contents' <- blockListToConTeXt contents
   let codeBlock x@(CodeBlock _ _) = [x]
       codeBlock _ = []
-  let codeBlocks = queryWith codeBlock contents
+  let codeBlocks = query codeBlock contents
   return $ if null codeBlocks
               then text "\\footnote{" <> nest 2 contents' <> char '}'
               else text "\\startbuffer " <> nest 2 contents' <>
                    text "\\stopbuffer\\footnote{\\getbuffer}"
+inlineToConTeXt (Span _ ils) = inlineListToConTeXt ils
 
 -- | Craft the section header, inserting the secton reference, if supplied.
-sectionHeader :: [Char]
+sectionHeader :: Attr
               -> Int
               -> [Inline]
               -> State WriterState Doc
-sectionHeader ident hdrLevel lst = do
+sectionHeader (ident,classes,_) hdrLevel lst = do
   contents <- inlineListToConTeXt lst
   st <- get
   let opts = stOptions st
   let level' = if writerChapters opts then hdrLevel - 1 else hdrLevel
+  let (section, chapter) = if "unnumbered" `elem` classes
+                              then (text "subject", text "title")
+                              else (text "section", text "chapter")
   return $ if level' >= 1 && level' <= 5
                then char '\\'
                     <> text (concat (replicate (level' - 1) "sub"))
-                    <> text "section"
+                    <> section
                     <> (if (not . null) ident then brackets (text ident) else empty)
                     <> braces contents
                     <> blankline
                else if level' == 0
-                       then "\\chapter{" <> contents <> "}"
+                       then char '\\' <> chapter <> braces contents
                        else contents <> blankline
 

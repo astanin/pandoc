@@ -32,8 +32,7 @@ the HTML using data URIs.
 -}
 module Text.Pandoc.SelfContained ( makeSelfContained ) where
 import Text.HTML.TagSoup
-import Network.URI (isAbsoluteURI, parseURI, escapeURIString)
-import Network.HTTP
+import Network.URI (isAbsoluteURI, escapeURIString)
 import Data.ByteString.Base64
 import qualified Data.ByteString.Char8 as B
 import Data.ByteString (ByteString)
@@ -41,61 +40,24 @@ import System.FilePath (takeExtension, dropExtension, takeDirectory, (</>))
 import Data.Char (toLower, isAscii, isAlphaNum)
 import Codec.Compression.GZip as Gzip
 import qualified Data.ByteString.Lazy as L
-import Text.Pandoc.Shared (findDataFile, renderTags')
+import Text.Pandoc.Shared (renderTags', openURL, readDataFile, err)
+import Text.Pandoc.UTF8 (toString,  fromString)
 import Text.Pandoc.MIME (getMimeType)
 import System.Directory (doesFileExist)
-import Text.Pandoc.UTF8 (toString,  fromString)
-
-getItem :: Maybe FilePath -> String -> IO (ByteString, Maybe String)
-getItem userdata f =
-  if isAbsoluteURI f
-     then openURL f
-     else do
-       let mime = case takeExtension f of
-                      ".gz" -> getMimeType $ dropExtension f
-                      x     -> getMimeType x
-       exists <- doesFileExist f
-       if exists
-          then do
-            cont <- B.readFile f
-            return (cont, mime)
-          else do
-            res <- findDataFile userdata f
-            exists' <- doesFileExist res
-            if exists'
-               then do
-                 cont <- B.readFile res
-                 return (cont, mime)
-               else error $ "Could not find `" ++ f ++ "'"
-
--- TODO - have this return mime type too - then it can work for google
--- chart API, e.g.
-openURL :: String -> IO (ByteString, Maybe String)
-openURL u = getBodyAndMimeType =<< simpleHTTP (getReq u)
-  where getReq v = case parseURI v of
-                     Nothing  -> error $ "Could not parse URI: " ++ v
-                     Just u'  -> mkRequest GET u'
-        getBodyAndMimeType (Left err) = fail (show err)
-        getBodyAndMimeType (Right r)  = return (rspBody r, findHeader HdrContentType r)
 
 isOk :: Char -> Bool
 isOk c = isAscii c && isAlphaNum c
 
 convertTag :: Maybe FilePath -> Tag String -> IO (Tag String)
-convertTag userdata t@(TagOpen "img" as) =
+convertTag userdata t@(TagOpen tagname as)
+  | tagname `elem` ["img", "embed", "video", "input", "audio", "source"] =
        case fromAttrib "src" t of
          []   -> return t
          src  -> do
            (raw, mime) <- getRaw userdata (fromAttrib "type" t) src
            let enc = "data:" ++ mime ++ ";base64," ++ toString (encode raw)
-           return $ TagOpen "img" (("src",enc) : [(x,y) | (x,y) <- as, x /= "src"])
-convertTag userdata t@(TagOpen "video" as) =
-       case fromAttrib "src" t of
-         []   -> return t
-         src  -> do
-           (raw, mime) <- getRaw userdata (fromAttrib "type" t) src
-           let enc = "data:" ++ mime ++ ";base64," ++ toString (encode raw)
-           return $ TagOpen "video" (("src",enc) : [(x,y) | (x,y) <- as, x /= "src"])
+           return $ TagOpen tagname
+                    (("src",enc) : [(x,y) | (x,y) <- as, x /= "src"])
 convertTag userdata t@(TagOpen "script" as) =
   case fromAttrib "src" t of
        []     -> return t
@@ -112,6 +74,7 @@ convertTag userdata t@(TagOpen "link" as) =
            return $ TagOpen "link" (("href",enc) : [(x,y) | (x,y) <- as, x /= "href"])
 convertTag _ t = return t
 
+-- NOTE: This is really crude, it doesn't respect CSS comments.
 cssURLs :: Maybe FilePath -> FilePath -> ByteString -> IO ByteString
 cssURLs userdata d orig =
   case B.breakSubstring "url(" orig of
@@ -131,6 +94,23 @@ cssURLs userdata d orig =
                   let enc = "data:" `B.append` fromString mime `B.append`
                                ";base64," `B.append` (encode raw)
                   return $ x `B.append` "url(" `B.append` enc `B.append` rest
+
+getItem :: Maybe FilePath -> String -> IO (ByteString, Maybe String)
+getItem userdata f =
+  if isAbsoluteURI f
+     then openURL f >>= either handleErr return
+     else do
+       -- strip off trailing query or fragment part, if relative URL.
+       -- this is needed for things like cmunrm.eot?#iefix,
+       -- which is used to get old versions of IE to work with web fonts.
+       let f' = takeWhile (\c -> c /= '?' && c /= '#') f
+       let mime = case takeExtension f' of
+                       ".gz" -> getMimeType $ dropExtension f'
+                       x     -> getMimeType x
+       exists <- doesFileExist f'
+       cont <- if exists then B.readFile f' else readDataFile userdata f'
+       return (cont, mime)
+  where handleErr e = err 61 $ "Failed to retrieve " ++ f ++ "\n" ++ show e
 
 getRaw :: Maybe FilePath -> String -> String -> IO (ByteString, String)
 getRaw userdata mimetype src = do

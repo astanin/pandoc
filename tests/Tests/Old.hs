@@ -27,7 +27,7 @@ pandocPath = ".." </> "dist" </> "build" </> "pandoc" </> "pandoc"
 
 data TestResult = TestPassed
                 | TestError ExitCode
-                | TestFailed String FilePath [(DI, String)]
+                | TestFailed String FilePath [Diff String]
      deriving (Eq)
 
 instance Show TestResult where
@@ -39,13 +39,13 @@ instance Show TestResult where
                                  dash
     where dash = replicate 72 '-'
 
-showDiff :: (Int,Int) -> [(DI, String)] -> String
+showDiff :: (Int,Int) -> [Diff String] -> String
 showDiff _ []             = ""
-showDiff (l,r) ((F, ln) : ds) =
+showDiff (l,r) (First ln : ds) =
   printf "+%4d " l ++ ln ++ "\n" ++ showDiff (l+1,r) ds
-showDiff (l,r) ((S, ln) : ds) =
+showDiff (l,r) (Second ln : ds) =
   printf "-%4d " r ++ ln ++ "\n" ++ showDiff (l,r+1) ds
-showDiff (l,r) ((B, _ ) : ds) =
+showDiff (l,r) (Both _ _ : ds) =
   showDiff (l+1,r+1) ds
 
 tests :: [Test]
@@ -63,7 +63,10 @@ tests = [ testGroup "markdown"
               "markdown-reader-more.txt" "markdown-reader-more.native"
             , lhsReaderTest "markdown+lhs"
             ]
-          , testGroup "citations" markdownCitationTests
+          , testGroup "citations"
+            [ test "citations" ["-r", "markdown", "-w", "native"]
+              "markdown-citations.txt" "markdown-citations.native"
+            ]
           ]
         , testGroup "rst"
           [ testGroup "writer" (writerTests "rst" ++ lhsWriterTests "rst")
@@ -124,6 +127,16 @@ tests = [ testGroup "markdown"
           , test "reader" ["-r", "mediawiki", "-w", "native", "-s"]
             "mediawiki-reader.wiki" "mediawiki-reader.native"
           ]
+        , testGroup "opml"
+          [ test "basic" ["-r", "native", "-w", "opml", "--columns=78", "-s"]
+             "testsuite.native" "writer.opml"
+          , test "reader" ["-r", "opml", "-w", "native", "-s"]
+            "opml-reader.opml" "opml-reader.native"
+          ]
+        , testGroup "haddock"
+          [ test "reader" ["-r", "haddock", "-w", "native", "-s"]
+            "haddock-reader.haddock" "haddock-reader.native"
+          ]
         , testGroup "other writers" $ map (\f -> testGroup f $ writerTests f)
           [ "opendocument" , "context" , "texinfo"
           , "man" , "plain" , "rtf", "org", "asciidoc"
@@ -147,8 +160,11 @@ lhsWriterTests format
 lhsReaderTest :: String -> Test
 lhsReaderTest format =
   testWithNormalize normalizer "lhs" ["-r", format, "-w", "native"]
-    ("lhs-test" <.> format) "lhs-test.native"
+    ("lhs-test" <.> format) norm
    where normalizer = writeNative def . normalize . readNative
+         norm = if format == "markdown+lhs"
+                   then "lhs-test-markdown.native"
+                   else "lhs-test.native"
 
 writerTests :: String -> [Test]
 writerTests format
@@ -177,19 +193,6 @@ fb2WriterTest title opts inputfile normfile =
     ignoreBinary = unlines . filter (not . startsWith "<binary ") . lines
     startsWith tag str = all (uncurry (==)) $ zip tag str
 
-markdownCitationTests :: [Test]
-markdownCitationTests
-  =  map styleToTest ["chicago-author-date","ieee","mhra"]
-     ++ [test "natbib" wopts "markdown-citations.txt"
-         "markdown-citations.txt"]
-  where
-    ropts             = ["-r", "markdown", "-w", "markdown", "--bibliography",
-                         "biblio.bib", "--no-wrap"]
-    wopts             = ropts ++ ["--natbib"]
-    styleToTest style = test style (ropts ++ ["--csl", style ++ ".csl"])
-                        "markdown-citations.txt"
-                        ("markdown-citations." ++ style ++ ".txt")
-
 -- | Run a test without normalize function, return True if test passed.
 test :: String    -- ^ Title of test
      -> [String]  -- ^ Options to pass to pandoc
@@ -209,7 +212,7 @@ testWithNormalize normalizer testname opts inp norm = testCase testname $ do
   (outputPath, hOut) <- openTempFile "" "pandoc-test"
   let inpPath = inp
   let normPath = norm
-  let options = ["--data-dir", ".."] ++ [inpPath] ++ opts
+  let options = ["--data-dir", ".." </> "data"] ++ [inpPath] ++ opts
   let cmd = pandocPath ++ " " ++ unwords options
   ph <- runProcess pandocPath options Nothing
         (Just [("TMP","."),("LANG","en_US.UTF-8"),("HOME", "./")]) Nothing (Just hOut)

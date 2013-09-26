@@ -45,7 +45,7 @@ import qualified Text.XML.Light.Cursor as XC
 import Text.Pandoc.Definition
 import Text.Pandoc.Options (WriterOptions(..), HTMLMathMethod(..), def)
 import Text.Pandoc.Shared (orderedListMarkers)
-import Text.Pandoc.Generic (bottomUp)
+import Text.Pandoc.Walk
 
 -- | Data to be written at the end of the document:
 -- (foot)notes, URLs, references, images.
@@ -158,7 +158,7 @@ renderSection level (ttl, body) = do
     return $ el "section" (title ++ content)
   where
     hasSubsections = any isHeader
-    isHeader (Header _ _) = True
+    isHeader (Header _ _ _) = True
     isHeader _ = False
 
 -- | Only <p> and <empty-line> are allowed within <title> in FB2.
@@ -186,13 +186,13 @@ splitSections level blocks = reverse $ revSplit (reverse blocks)
     let (lastsec, before) = break sameLevel rblocks
         (header, prevblocks) =
             case before of
-              ((Header n title):prevblocks') ->
+              ((Header n _ title):prevblocks') ->
                   if n == level
                      then (title, prevblocks')
                      else ([], before)
               _ -> ([], before)
     in (header, reverse lastsec) : revSplit prevblocks
-  sameLevel (Header n _) = n == level
+  sameLevel (Header n _ _) = n == level
   sameLevel _ = False
 
 -- | Make another FictionBook body with footnotes.
@@ -316,12 +316,15 @@ linkID i = "l" ++ (show i)
 blockToXml :: Block -> FBM [Content]
 blockToXml (Plain ss) = cMapM toXml ss  -- FIXME: can lead to malformed FB2
 blockToXml (Para [Math DisplayMath formula]) = insertMath NormalImage formula
-blockToXml (Para [img@(Image _ _)]) = insertImage NormalImage img
+-- title beginning with fig: indicates that the image is a figure
+blockToXml (Para [Image alt (src,'f':'i':'g':':':tit)]) =
+  insertImage NormalImage (Image alt (src,tit))
 blockToXml (Para ss) = liftM (list . el "p") $ cMapM toXml ss
 blockToXml (CodeBlock _ s) = return . spaceBeforeAfter .
                              map (el "p" . el "code") . lines $ s
 blockToXml (RawBlock _ s) = return . spaceBeforeAfter .
                             map (el "p" . el "code") . lines $ s
+blockToXml (Div _ bs) = cMapM blockToXml bs
 blockToXml (BlockQuote bs) = liftM (list . el "cite") $ cMapM blockToXml bs
 blockToXml (OrderedList a bss) = do
     state <- get
@@ -361,7 +364,7 @@ blockToXml (DefinitionList defs) =
       needsBreak (Para _) = False
       needsBreak (Plain ins) = LineBreak `notElem` ins
       needsBreak _ = True
-blockToXml (Header _ _) = -- should never happen, see renderSections
+blockToXml (Header _ _ _) = -- should never happen, see renderSections
                           error "unexpected header in section text"
 blockToXml HorizontalRule = return
                             [ el "empty-line" ()
@@ -413,22 +416,27 @@ indent = indentBlock
     let s' = unlines . map (spacer++) . lines $ s
     in  CodeBlock a s'
   indentBlock (BlockQuote bs) = BlockQuote (map indent bs)
-  indentBlock (Header l ins) = Header l (indentLines ins)
+  indentBlock (Header l attr' ins) = Header l attr' (indentLines ins)
   indentBlock everythingElse = everythingElse
   -- indent every (explicit) line
   indentLines :: [Inline] -> [Inline]
   indentLines ins = let lns = split isLineBreak ins :: [[Inline]]
                     in  intercalate [LineBreak] $ map ((Str spacer):) lns
 
+capitalize :: Inline -> Inline
+capitalize (Str xs) = Str $ map toUpper xs
+capitalize x = x
+
 -- | Convert a Pandoc's Inline element to FictionBook XML representation.
 toXml :: Inline -> FBM [Content]
 toXml (Str s) = return [txt s]
+toXml (Span _ ils) = cMapM toXml ils
 toXml (Emph ss) = list `liftM` wrap "emphasis" ss
 toXml (Strong ss) = list `liftM` wrap "strong" ss
 toXml (Strikeout ss) = list `liftM` wrap "strikethrough" ss
 toXml (Superscript ss) = list `liftM` wrap "sup" ss
 toXml (Subscript ss) = list `liftM` wrap "sub" ss
-toXml (SmallCaps ss) = cMapM toXml $ bottomUp (map toUpper) ss
+toXml (SmallCaps ss) = cMapM toXml $ walk capitalize ss
 toXml (Quoted SingleQuote ss) = do  -- FIXME: should be language-specific
   inner <- cMapM toXml ss
   return $ [txt "‘"] ++ inner ++ [txt "’"]
@@ -558,6 +566,7 @@ list = (:[])
 plain :: Inline -> String
 plain (Str s) = s
 plain (Emph ss) = concat (map plain ss)
+plain (Span _ ss) = concat (map plain ss)
 plain (Strong ss) = concat (map plain ss)
 plain (Strikeout ss) = concat (map plain ss)
 plain (Superscript ss) = concat (map plain ss)

@@ -1,6 +1,6 @@
 Simple table with caption:
 
-\begin{longtable}[c]{rlcl}
+\begin{longtable}[c]{@{}rlcl@{}}
 \hline\noalign{\medskip}
 Right & Left & Center & Default
 \\\noalign{\medskip}
@@ -18,7 +18,7 @@ Right & Left & Center & Default
 
 Simple table without caption:
 
-\begin{longtable}[c]{rlcl}
+\begin{longtable}[c]{@{}rlcl@{}}
 \hline\noalign{\medskip}
 Right & Left & Center & Default
 \\\noalign{\medskip}
@@ -34,7 +34,7 @@ Right & Left & Center & Default
 
 Simple table indented two spaces:
 
-\begin{longtable}[c]{rlcl}
+\begin{longtable}[c]{@{}rlcl@{}}
 \hline\noalign{\medskip}
 Right & Left & Center & Default
 \\\noalign{\medskip}
@@ -52,38 +52,38 @@ Right & Left & Center & Default
 
 Multiline table with caption:
 
-\begin{longtable}[c]{clrl}
+\begin{longtable}[c]{@{}clrl@{}}
 \hline\noalign{\medskip}
-\parbox[b]{0.15\columnwidth}{\centering
+\begin{minipage}[b]{0.13\columnwidth}\centering
 Centered Header
-} & \parbox[b]{0.14\columnwidth}{\raggedright
+\end{minipage} & \begin{minipage}[b]{0.12\columnwidth}\raggedright
 Left Aligned
-} & \parbox[b]{0.16\columnwidth}{\raggedleft
+\end{minipage} & \begin{minipage}[b]{0.14\columnwidth}\raggedleft
 Right Aligned
-} & \parbox[b]{0.34\columnwidth}{\raggedright
+\end{minipage} & \begin{minipage}[b]{0.30\columnwidth}\raggedright
 Default aligned
-}
+\end{minipage}
 \\\noalign{\medskip}
 \hline\noalign{\medskip}
-\parbox[t]{0.15\columnwidth}{\centering
+\begin{minipage}[t]{0.13\columnwidth}\centering
 First
-} & \parbox[t]{0.14\columnwidth}{\raggedright
+\end{minipage} & \begin{minipage}[t]{0.12\columnwidth}\raggedright
 row
-} & \parbox[t]{0.16\columnwidth}{\raggedleft
+\end{minipage} & \begin{minipage}[t]{0.14\columnwidth}\raggedleft
 12.0
-} & \parbox[t]{0.34\columnwidth}{\raggedright
+\end{minipage} & \begin{minipage}[t]{0.30\columnwidth}\raggedright
 Example of a row that spans multiple lines.
-}
+\end{minipage}
 \\\noalign{\medskip}
-\parbox[t]{0.15\columnwidth}{\centering
+\begin{minipage}[t]{0.13\columnwidth}\centering
 Second
-} & \parbox[t]{0.14\columnwidth}{\raggedright
+\end{minipage} & \begin{minipage}[t]{0.12\columnwidth}\raggedright
 row
-} & \parbox[t]{0.16\columnwidth}{\raggedleft
+\end{minipage} & \begin{minipage}[t]{0.14\columnwidth}\raggedleft
 5.0
-} & \parbox[t]{0.34\columnwidth}{\raggedright
+\end{minipage} & \begin{minipage}[t]{0.30\columnwidth}\raggedright
 Here's another one. Note the blank line between rows.
-}
+\end{minipage}
 \\\noalign{\medskip}
 \hline
 \noalign{\medskip}
@@ -92,45 +92,45 @@ Here's another one. Note the blank line between rows.
 
 Multiline table without caption:
 
-\begin{longtable}[c]{clrl}
+\begin{longtable}[c]{@{}clrl@{}}
 \hline\noalign{\medskip}
-\parbox[b]{0.15\columnwidth}{\centering
+\begin{minipage}[b]{0.13\columnwidth}\centering
 Centered Header
-} & \parbox[b]{0.14\columnwidth}{\raggedright
+\end{minipage} & \begin{minipage}[b]{0.12\columnwidth}\raggedright
 Left Aligned
-} & \parbox[b]{0.16\columnwidth}{\raggedleft
+\end{minipage} & \begin{minipage}[b]{0.14\columnwidth}\raggedleft
 Right Aligned
-} & \parbox[b]{0.34\columnwidth}{\raggedright
+\end{minipage} & \begin{minipage}[b]{0.30\columnwidth}\raggedright
 Default aligned
-}
+\end{minipage}
 \\\noalign{\medskip}
 \hline\noalign{\medskip}
-\parbox[t]{0.15\columnwidth}{\centering
+\begin{minipage}[t]{0.13\columnwidth}\centering
 First
-} & \parbox[t]{0.14\columnwidth}{\raggedright
+\end{minipage} & \begin{minipage}[t]{0.12\columnwidth}\raggedright
 row
-} & \parbox[t]{0.16\columnwidth}{\raggedleft
+\end{minipage} & \begin{minipage}[t]{0.14\columnwidth}\raggedleft
 12.0
-} & \parbox[t]{0.34\columnwidth}{\raggedright
+\end{minipage} & \begin{minipage}[t]{0.30\columnwidth}\raggedright
 Example of a row that spans multiple lines.
-}
+\end{minipage}
 \\\noalign{\medskip}
-\parbox[t]{0.15\columnwidth}{\centering
+\begin{minipage}[t]{0.13\columnwidth}\centering
 Second
-} & \parbox[t]{0.14\columnwidth}{\raggedright
+\end{minipage} & \begin{minipage}[t]{0.12\columnwidth}\raggedright
 row
-} & \parbox[t]{0.16\columnwidth}{\raggedleft
+\end{minipage} & \begin{minipage}[t]{0.14\columnwidth}\raggedleft
 5.0
-} & \parbox[t]{0.34\columnwidth}{\raggedright
+\end{minipage} & \begin{minipage}[t]{0.30\columnwidth}\raggedright
 Here's another one. Note the blank line between rows.
-}
+\end{minipage}
 \\\noalign{\medskip}
 \hline
 \end{longtable}
 
 Table without column headers:
 
-\begin{longtable}[c]{rlcr}
+\begin{longtable}[c]{@{}rlcr@{}}
 \hline\noalign{\medskip}
 12 & 12 & 12 & 12
 \\\noalign{\medskip}
@@ -143,27 +143,27 @@ Table without column headers:
 
 Multiline table without column headers:
 
-\begin{longtable}[c]{clrl}
+\begin{longtable}[c]{@{}clrl@{}}
 \hline\noalign{\medskip}
-\parbox[t]{0.15\columnwidth}{\centering
+\begin{minipage}[t]{0.13\columnwidth}\centering
 First
-} & \parbox[t]{0.14\columnwidth}{\raggedright
+\end{minipage} & \begin{minipage}[t]{0.12\columnwidth}\raggedright
 row
-} & \parbox[t]{0.16\columnwidth}{\raggedleft
+\end{minipage} & \begin{minipage}[t]{0.14\columnwidth}\raggedleft
 12.0
-} & \parbox[t]{0.34\columnwidth}{\raggedright
+\end{minipage} & \begin{minipage}[t]{0.30\columnwidth}\raggedright
 Example of a row that spans multiple lines.
-}
+\end{minipage}
 \\\noalign{\medskip}
-\parbox[t]{0.15\columnwidth}{\centering
+\begin{minipage}[t]{0.13\columnwidth}\centering
 Second
-} & \parbox[t]{0.14\columnwidth}{\raggedright
+\end{minipage} & \begin{minipage}[t]{0.12\columnwidth}\raggedright
 row
-} & \parbox[t]{0.16\columnwidth}{\raggedleft
+\end{minipage} & \begin{minipage}[t]{0.14\columnwidth}\raggedleft
 5.0
-} & \parbox[t]{0.34\columnwidth}{\raggedright
+\end{minipage} & \begin{minipage}[t]{0.30\columnwidth}\raggedright
 Here's another one. Note the blank line between rows.
-}
+\end{minipage}
 \\\noalign{\medskip}
 \hline
 \end{longtable}

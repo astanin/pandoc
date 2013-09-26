@@ -1,6 +1,10 @@
-% Pandoc Test Suite
-% John MacFarlane; Anonymous
-% July 17, 2006
+---
+author:
+- John MacFarlane
+- Anonymous
+date: 'July 17, 2006'
+title: Pandoc Test Suite
+...
 
 This is a set of tests for pandoc. Most of them are adapted from John Gruber’s
 markdown test suite.
@@ -352,20 +356,31 @@ HTML Blocks
 Simple block on one line:
 
 <div>
+
 foo
+
 </div>
 
 And nested without indentation:
 
 <div>
+
 <div>
+
 <div>
+
 foo
+
 </div>
+
 </div>
+
 <div>
+
 bar
+
 </div>
+
 </div>
 
 Interpreted markdown in a table:
@@ -386,8 +401,9 @@ And this is **strong**
 Here’s a simple block:
 
 <div>
-    
+
 foo
+
 </div>
 
 This should be a code block, though:
@@ -403,12 +419,17 @@ As should this:
 Now, nested:
 
 <div>
-    <div>
-        <div>
-            
+
+<div>
+
+<div>
+
 foo
+
 </div>
-    </div>
+
+</div>
+
 </div>
 
 This should just be an HTML comment:

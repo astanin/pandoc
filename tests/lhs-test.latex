@@ -4,21 +4,26 @@
 \usepackage{amssymb,amsmath}
 \usepackage{ifxetex,ifluatex}
 \usepackage{fixltx2e} % provides \textsubscript
-% use microtype if available
-\IfFileExists{microtype.sty}{\usepackage{microtype}}{}
+% use upquote if available, for straight quotes in verbatim environments
+\IfFileExists{upquote.sty}{\usepackage{upquote}}{}
 \ifnum 0\ifxetex 1\fi\ifluatex 1\fi=0 % if pdftex
   \usepackage[utf8]{inputenc}
 \else % if luatex or xelatex
-  \usepackage{fontspec}
   \ifxetex
+    \usepackage{mathspec}
     \usepackage{xltxtra,xunicode}
+  \else
+    \usepackage{fontspec}
   \fi
   \defaultfontfeatures{Mapping=tex-text,Scale=MatchLowercase}
   \newcommand{\euro}{€}
 \fi
+% use microtype if available
+\IfFileExists{microtype.sty}{\usepackage{microtype}}{}
 \usepackage{color}
 \usepackage{fancyvrb}
-\DefineShortVerb[commandchars=\\\{\}]{\|}
+\newcommand{\VerbBar}{|}
+\newcommand{\VERB}{\Verb[commandchars=\\\{\}]}
 \DefineVerbatimEnvironment{Highlighting}{Verbatim}{commandchars=\\\{\}}
 % Add ',fontsize=\small' for more characters per line
 \newenvironment{Shaded}{}{}
@@ -48,9 +53,11 @@
             pdfauthor={},
             pdftitle={},
             colorlinks=true,
+            citecolor=blue,
             urlcolor=blue,
             linkcolor=magenta,
             pdfborder={0 0 0}}
+\urlstyle{same}  % don't use monospace font for urls
 \setlength{\parindent}{0pt}
 \setlength{\parskip}{6pt plus 2pt minus 1pt}
 \setlength{\emergencystretch}{3em}  % prevent overfull lines
@@ -61,7 +68,7 @@
 
 \begin{document}
 
-\section{lhs test}
+\section{lhs test}\label{lhs-test}
 
 \texttt{unsplit} is an arrow that takes a pair of values and combines them to
 return a single value:
@@ -69,8 +76,8 @@ return a single value:
 \begin{Shaded}
 \begin{Highlighting}[]
 \OtherTok{unsplit ::} \NormalTok{(}\DataTypeTok{Arrow} \NormalTok{a) }\OtherTok{=>} \NormalTok{(b }\OtherTok{->} \NormalTok{c }\OtherTok{->} \NormalTok{d) }\OtherTok{->} \NormalTok{a (b, c) d}
-\NormalTok{unsplit }\FunctionTok{=} \NormalTok{arr }\FunctionTok{.} \FunctionTok{uncurry}       
-          \CommentTok{-- arr (\textbackslash{}op (x,y) -> x {\char18}op{\char18} y) }
+\NormalTok{unsplit }\FunctionTok{=} \NormalTok{arr }\FunctionTok{.} \NormalTok{uncurry}
+          \CommentTok{-- arr (\textbackslash{}op (x,y) -> x `op` y)}
 \end{Highlighting}
 \end{Shaded}
 

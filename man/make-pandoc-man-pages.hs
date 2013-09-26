@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP #-}
 -- Create pandoc.1 man and pandoc_markdown.5 man pages from README
 import Text.Pandoc
 import qualified Text.Pandoc.UTF8 as UTF8
@@ -7,11 +8,14 @@ import System.FilePath
 import System.Environment (getArgs)
 import Text.Pandoc.Shared (normalize)
 import Data.Maybe ( catMaybes )
-import Data.Time.Clock (UTCTime(..))
 import Prelude hiding (catch)
 import Control.Exception ( catch )
 import System.IO.Error ( isDoesNotExistError )
+#if MIN_VERSION_directory(1,2,0)
+import Data.Time.Clock (UTCTime(..))
+#else
 import System.Time (ClockTime(..))
+#endif
 import System.Directory
 
 main :: IO ()
@@ -55,7 +59,7 @@ removeLinks (Link l _) = l
 removeLinks x = [x]
 
 capitalizeHeaders :: Block -> Block
-capitalizeHeaders (Header 1 xs) = Header 1 $ bottomUp capitalize xs
+capitalizeHeaders (Header 1 attr xs) = Header 1 attr $ bottomUp capitalize xs
 capitalizeHeaders x = x
 
 capitalize :: Inline -> Inline
@@ -63,22 +67,22 @@ capitalize (Str xs) = Str $ map toUpper xs
 capitalize x = x
 
 removeSect :: [Inline] -> [Block] -> [Block]
-removeSect ils (Header 1 x:xs) | normalize x == normalize ils =
+removeSect ils (Header 1 _ x:xs) | normalize x == normalize ils =
   dropWhile (not . isHeader1) xs
 removeSect ils (x:xs) = x : removeSect ils xs
 removeSect _ [] = []
 
 extractSect :: [Inline] -> [Block] -> [Block]
-extractSect ils (Header 1 z:xs) | normalize z == normalize ils =
+extractSect ils (Header 1 _ z:xs) | normalize z == normalize ils =
   bottomUp promoteHeader $ takeWhile (not . isHeader1) xs
-    where promoteHeader (Header n x) = Header (n-1) x
+    where promoteHeader (Header n attr x) = Header (n-1) attr x
           promoteHeader x            = x
 extractSect ils (x:xs) = extractSect ils xs
 extractSect _ [] = []
 
 isHeader1 :: Block -> Bool
-isHeader1 (Header 1 _) = True
-isHeader1 _            = False
+isHeader1 (Header 1 _ _ ) = True
+isHeader1 _               = False
 
 
 -- | Returns a list of 'dependencies' that have been modified after 'file'.

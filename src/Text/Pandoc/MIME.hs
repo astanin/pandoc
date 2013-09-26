@@ -27,7 +27,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 Mime type lookup for ODT writer.
 -}
-module Text.Pandoc.MIME ( getMimeType )
+module Text.Pandoc.MIME ( getMimeType, extensionFromMimeType )
 where
 import System.FilePath
 import Data.Char ( toLower )
@@ -37,7 +37,14 @@ import qualified Data.Map as M
 getMimeType :: FilePath -> Maybe String
 getMimeType "layout-cache" = Just "application/binary"  -- in ODT
 getMimeType f = M.lookup (map toLower $ drop 1 $ takeExtension f) mimeTypes
-  where mimeTypes = M.fromList -- List borrowed from happstack-server.
+  where mimeTypes = M.fromList mimeTypesList
+
+extensionFromMimeType :: String -> Maybe String
+extensionFromMimeType mimetype = M.lookup mimetype reverseMimeTypes
+  where reverseMimeTypes = M.fromList $ map (\(k,v) -> (v,k)) mimeTypesList
+
+mimeTypesList :: [(String, String)]
+mimeTypesList = -- List borrowed from happstack-server.
            [("gz","application/x-gzip")
            ,("cabal","application/x-cabal")
            ,("%","application/x-trash")
@@ -156,6 +163,7 @@ getMimeType f = M.lookup (map toLower $ drop 1 $ takeExtension f) mimeTypes
            ,("fm","application/x-maker")
            ,("frame","application/x-maker")
            ,("frm","application/x-maker")
+           ,("fs","text/plain")
            ,("gal","chemical/x-gaussian-log")
            ,("gam","chemical/x-gamess-input")
            ,("gamin","chemical/x-gamess-input")
@@ -443,6 +451,7 @@ getMimeType f = M.lookup (map toLower $ drop 1 $ takeExtension f) mimeTypes
            ,("vms","chemical/x-vamas-iso14976")
            ,("vrm","x-world/x-vrml")
            ,("vrml","model/vrml")
+           ,("vs","text/plain")
            ,("vsd","application/vnd.visio")
            ,("wad","application/x-doom")
            ,("wav","audio/x-wav")

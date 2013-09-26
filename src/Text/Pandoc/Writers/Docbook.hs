@@ -1,3 +1,4 @@
+{-# LANGUAGE OverloadedStrings #-}
 {-
 Copyright (C) 2006-2010 John MacFarlane <jgm@berkeley.edu>
 
@@ -31,22 +32,28 @@ module Text.Pandoc.Writers.Docbook ( writeDocbook) where
 import Text.Pandoc.Definition
 import Text.Pandoc.XML
 import Text.Pandoc.Shared
+import Text.Pandoc.Writers.Shared
 import Text.Pandoc.Options
-import Text.Pandoc.Templates (renderTemplate)
+import Text.Pandoc.Templates (renderTemplate')
 import Text.Pandoc.Readers.TeXMath
 import Data.List ( isPrefixOf, intercalate, isSuffixOf )
 import Data.Char ( toLower )
 import Text.Pandoc.Highlighting ( languages, languagesByExtension )
 import Text.Pandoc.Pretty
+import qualified Text.Pandoc.Builder as B
 import Text.TeXMath
 import qualified Text.XML.Light as Xml
 import Data.Generics (everywhere, mkT)
 
 -- | Convert list of authors to a docbook <author> section
-authorToDocbook :: WriterOptions -> [Inline] -> Doc
+authorToDocbook :: WriterOptions -> [Inline] -> B.Inlines
 authorToDocbook opts name' =
   let name = render Nothing $ inlinesToDocbook opts name'
-  in  if ',' `elem` name
+      colwidth = if writerWrapText opts
+                    then Just $ writerColumns opts
+                    else Nothing
+  in  B.rawInline "docbook" $ render colwidth $
+      if ',' `elem` name
          then -- last name first
               let (lastname, rest) = break (==',') name
                   firstname = triml rest in
@@ -64,11 +71,8 @@ authorToDocbook opts name' =
 
 -- | Convert Pandoc document to string in Docbook format.
 writeDocbook :: WriterOptions -> Pandoc -> String
-writeDocbook opts (Pandoc (Meta tit auths dat) blocks) =
-  let title = inlinesToDocbook opts tit
-      authors = map (authorToDocbook opts) auths
-      date = inlinesToDocbook opts dat
-      elements = hierarchicalize blocks
+writeDocbook opts (Pandoc meta blocks) =
+  let elements = hierarchicalize blocks
       colwidth = if writerWrapText opts
                     then Just $ writerColumns opts
                     else Nothing
@@ -78,23 +82,26 @@ writeDocbook opts (Pandoc (Meta tit auths dat) blocks) =
                  then opts{ writerChapters = True }
                  else opts
       startLvl = if writerChapters opts' then 0 else 1
+      auths'   = map (authorToDocbook opts) $ docAuthors meta
+      meta'    = B.setMeta "author" auths' meta
+      Just metadata = metaToJSON opts
+                 (Just . render colwidth . blocksToDocbook opts)
+                 (Just . render colwidth . inlinesToDocbook opts)
+                 meta'
       main     = render' $ vcat (map (elementToDocbook opts' startLvl) elements)
-      context = writerVariables opts ++
-                [ ("body", main)
-                , ("title", render' title)
-                , ("date", render' date) ] ++
-                [ ("author", render' a) | a <- authors ] ++
-                [ ("mathml", "yes") | case writerHTMLMathMethod opts of
-                                            MathML _ -> True
-                                            _ -> False ]
+      context = defField "body" main
+              $ defField "mathml" (case writerHTMLMathMethod opts of
+                                        MathML _ -> True
+                                        _        -> False)
+              $ metadata
   in  if writerStandalone opts
-         then renderTemplate context $ writerTemplate opts
+         then renderTemplate' (writerTemplate opts) context
          else main
 
 -- | Convert an Element to Docbook.
 elementToDocbook :: WriterOptions -> Int -> Element -> Doc
 elementToDocbook opts _   (Blk block) = blockToDocbook opts block
-elementToDocbook opts lvl (Sec _ _num id' title elements) =
+elementToDocbook opts lvl (Sec _ _num (id',_,_) title elements) =
   -- Docbook doesn't allow sections with no content, so insert some if needed
   let elements' = if null elements
                     then [Blk (Para [])]
@@ -142,9 +149,11 @@ listItemToDocbook opts item =
 -- | Convert a Pandoc block element to Docbook.
 blockToDocbook :: WriterOptions -> Block -> Doc
 blockToDocbook _ Null = empty
-blockToDocbook _ (Header _ _) = empty -- should not occur after hierarchicalize
+blockToDocbook opts (Div _ bs) = blocksToDocbook opts $ map plainToPara bs
+blockToDocbook _ (Header _ _ _) = empty -- should not occur after hierarchicalize
 blockToDocbook opts (Plain lst) = inlinesToDocbook opts lst
-blockToDocbook opts (Para [Image txt (src,_)]) =
+-- title beginning with fig: indicates that the image is a figure
+blockToDocbook opts (Para [Image txt (src,'f':'i':'g':':':_)]) =
   let alt  = inlinesToDocbook opts txt
       capt = if null txt
                 then empty
@@ -191,10 +200,10 @@ blockToDocbook opts (OrderedList (start, numstyle, _) (first:rest)) =
   in  inTags True "orderedlist" attribs items
 blockToDocbook opts (DefinitionList lst) =
   inTagsIndented "variablelist" $ deflistItemsToDocbook opts lst
-blockToDocbook _ (RawBlock "docbook" str) = text str -- raw XML block
--- we allow html for compatibility with earlier versions of pandoc
-blockToDocbook _ (RawBlock "html" str) = text str -- raw XML block
-blockToDocbook _ (RawBlock _ _) = empty
+blockToDocbook _ (RawBlock f str)
+  | f == "docbook" = text str -- raw XML block
+  | f == "html"    = text str -- allow html for backwards compatibility
+  | otherwise      = empty
 blockToDocbook _ HorizontalRule = empty -- not semantic
 blockToDocbook opts (Table caption aligns widths headers rows) =
   let captionDoc   = if null caption
@@ -260,6 +269,8 @@ inlineToDocbook opts (Quoted _ lst) =
   inTagsSimple "quote" $ inlinesToDocbook opts lst
 inlineToDocbook opts (Cite _ lst) =
   inlinesToDocbook opts lst
+inlineToDocbook opts (Span _ ils) =
+  inlinesToDocbook opts ils
 inlineToDocbook _ (Code _ str) =
   inTagsSimple "literal" $ text (escapeStringForXML str)
 inlineToDocbook opts (Math t str)
@@ -281,7 +292,7 @@ inlineToDocbook opts (Math t str)
            fixNS = everywhere (mkT fixNS')
 inlineToDocbook _ (RawInline f x) | f == "html" || f == "docbook" = text x
                                   | otherwise                     = empty
-inlineToDocbook _ LineBreak = inTagsSimple "literallayout" empty
+inlineToDocbook _ LineBreak = flush $ inTagsSimple "literallayout" (text "\n")
 inlineToDocbook _ Space = space
 inlineToDocbook opts (Link txt (src, _)) =
   if isPrefixOf "mailto:" src
@@ -289,7 +300,7 @@ inlineToDocbook opts (Link txt (src, _)) =
               emailLink = inTagsSimple "email" $ text $
                           escapeStringForXML $ src'
           in  case txt of
-               [Code _ s] | s == src' -> emailLink
+               [Str s] | escapeURI s == src' -> emailLink
                _             -> inlinesToDocbook opts txt <+>
                                   char '(' <> emailLink <> char ')'
      else (if isPrefixOf "#" src

@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP #-}
 {-
 Copyright (C) 2010 John MacFarlane <jgm@berkeley.edu>
 
@@ -47,8 +48,12 @@ where
 
 import System.IO hiding (readFile, writeFile, getContents,
                           putStr, putStrLn, hPutStr, hPutStrLn, hGetContents)
+#if MIN_VERSION_base(4,6,0)
+import Prelude hiding (readFile, writeFile, getContents, putStr, putStrLn)
+#else
 import Prelude hiding (readFile, writeFile, getContents, putStr, putStrLn,
                        catch)
+#endif
 import qualified System.IO as IO
 import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString.Lazy as BL
@@ -56,7 +61,6 @@ import qualified Data.Text.Encoding as T
 import qualified Data.Text as T
 import qualified Data.Text.Lazy as TL
 import qualified Data.Text.Lazy.Encoding as TL
-import Data.Text.Encoding.Error
 
 readFile :: FilePath -> IO String
 readFile f = do
@@ -82,19 +86,30 @@ hPutStrLn :: Handle -> String -> IO ()
 hPutStrLn h s = hSetEncoding h utf8 >> IO.hPutStrLn h s
 
 hGetContents :: Handle -> IO String
-hGetContents h = fmap (TL.unpack . TL.decodeUtf8) $ BL.hGetContents h
+hGetContents = fmap toString . B.hGetContents
 -- hGetContents h = hSetEncoding h utf8_bom
 --                   >> hSetNewlineMode h universalNewlineMode
 --                   >> IO.hGetContents h
 
+-- | Drop BOM (byte order marker) if present at beginning of string.
+-- Note that Data.Text converts the BOM to code point FEFF, zero-width
+-- no-break space, so if the string begins with this  we strip it off.
+dropBOM :: String -> String
+dropBOM ('\xFEFF':xs) = xs
+dropBOM xs = xs
+
+-- | Convert UTF8-encoded ByteString to String, also
+-- removing '\r' characters.
 toString :: B.ByteString -> String
-toString = T.unpack . T.decodeUtf8With lenientDecode
+toString = filter (/='\r') . dropBOM . T.unpack . T.decodeUtf8
 
 fromString :: String -> B.ByteString
 fromString = T.encodeUtf8 . T.pack
 
+-- | Convert UTF8-encoded ByteString to String, also
+-- removing '\r' characters.
 toStringLazy :: BL.ByteString -> String
-toStringLazy = TL.unpack . TL.decodeUtf8With lenientDecode
+toStringLazy = filter (/='\r') . dropBOM . TL.unpack . TL.decodeUtf8
 
 fromStringLazy :: String -> BL.ByteString
 fromStringLazy = TL.encodeUtf8 . TL.pack

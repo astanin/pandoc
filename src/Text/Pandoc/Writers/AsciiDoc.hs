@@ -38,13 +38,17 @@ AsciiDoc:  <http://www.methods.co.nz/asciidoc/>
 -}
 module Text.Pandoc.Writers.AsciiDoc (writeAsciiDoc) where
 import Text.Pandoc.Definition
-import Text.Pandoc.Templates (renderTemplate)
+import Text.Pandoc.Templates (renderTemplate')
 import Text.Pandoc.Shared
+import Text.Pandoc.Writers.Shared
 import Text.Pandoc.Options
 import Text.Pandoc.Parsing hiding (blankline, space)
 import Data.List ( isPrefixOf, intersperse, intercalate )
 import Text.Pandoc.Pretty
 import Control.Monad.State
+import qualified Data.Map as M
+import Data.Aeson (Value(String), fromJSON, toJSON, Result(..))
+import qualified Data.Text as T
 
 data WriterState = WriterState { defListMarker :: String
                                , orderedListLevel :: Int
@@ -62,29 +66,32 @@ writeAsciiDoc opts document =
 
 -- | Return asciidoc representation of document.
 pandocToAsciiDoc :: WriterOptions -> Pandoc -> State WriterState String
-pandocToAsciiDoc opts (Pandoc (Meta title authors date) blocks) = do
-  title' <- inlineListToAsciiDoc opts title
-  let title'' = title' $$ text (replicate (offset title') '=')
-  authors' <- mapM (inlineListToAsciiDoc opts) authors
-  -- asciidoc only allows a singel author
-  date' <- inlineListToAsciiDoc opts date
-  let titleblock = not $ null title && null authors && null date
-  body <- blockListToAsciiDoc opts blocks
+pandocToAsciiDoc opts (Pandoc meta blocks) = do
+  let titleblock = not $ null (docTitle meta) && null (docAuthors meta) &&
+                         null (docDate meta)
   let colwidth = if writerWrapText opts
                     then Just $ writerColumns opts
                     else Nothing
+  metadata <- metaToJSON opts
+              (fmap (render colwidth) . blockListToAsciiDoc opts)
+              (fmap (render colwidth) . inlineListToAsciiDoc opts)
+              meta
+  let addTitleLine (String t) = String $
+         t <> "\n" <> T.replicate (T.length t) "="
+      addTitleLine x = x
+  let metadata' = case fromJSON metadata of
+                        Success m  -> toJSON $ M.adjust addTitleLine
+                                                 ("title" :: T.Text) m
+                        _          -> metadata
+  body <- blockListToAsciiDoc opts blocks
   let main = render colwidth body
-  let context  = writerVariables opts ++
-                 [ ("body", main)
-                 , ("title", render colwidth title'')
-                 , ("date", render colwidth date')
-                 ] ++
-                 [ ("toc", "yes") | writerTableOfContents opts &&
-                                    writerStandalone opts ] ++
-                 [ ("titleblock", "yes") | titleblock ] ++
-                 [ ("author", render colwidth a) | a <- authors' ]
+  let context  = defField "body" main
+               $ defField "toc"
+                  (writerTableOfContents opts && writerStandalone opts)
+               $ defField "titleblock" titleblock
+               $ metadata'
   if writerStandalone opts
-     then return $ renderTemplate context $ writerTemplate opts
+     then return $ renderTemplate' (writerTemplate opts) context
      else return main
 
 -- | Escape special characters for AsciiDoc.
@@ -116,6 +123,8 @@ blockToAsciiDoc _ Null = return empty
 blockToAsciiDoc opts (Plain inlines) = do
   contents <- inlineListToAsciiDoc opts inlines
   return $ contents <> cr
+blockToAsciiDoc opts (Para [Image alt (src,'f':'i':'g':':':tit)]) =
+  blockToAsciiDoc opts (Para [Image alt (src,tit)])
 blockToAsciiDoc opts (Para inlines) = do
   contents <- inlineListToAsciiDoc opts inlines
   -- escape if para starts with ordered list marker
@@ -123,19 +132,30 @@ blockToAsciiDoc opts (Para inlines) = do
                then text "\\"
                else empty
   return $ esc <> contents <> blankline
-blockToAsciiDoc _ (RawBlock _ _) = return empty
+blockToAsciiDoc _ (RawBlock f s)
+  | f == "asciidoc" = return $ text s
+  | otherwise       = return empty
 blockToAsciiDoc _ HorizontalRule =
   return $ blankline <> text "'''''" <> blankline
-blockToAsciiDoc opts (Header level inlines) = do
+blockToAsciiDoc opts (Header level (ident,_,_) inlines) = do
   contents <- inlineListToAsciiDoc opts inlines
   let len = offset contents
-  return $ contents <> cr <>
-         (case level of
+  -- ident seem to be empty most of the time and asciidoc will generate them automatically
+  -- so lets make them not show up when null
+  let identifier = if (null ident) then empty else ("[[" <> text ident <> "]]") 
+  let setext = writerSetextHeaders opts
+  return $ 
+         (if setext 
+            then
+              identifier $$ contents $$
+              (case level of
                1  -> text $ replicate len '-'
                2  -> text $ replicate len '~'
                3  -> text $ replicate len '^'
                4  -> text $ replicate len '+'
                _  -> empty) <> blankline
+            else
+              identifier $$ text (replicate level '=') <> space <> contents <> blankline) 
 blockToAsciiDoc _ (CodeBlock (_,classes,_) str) = return $
   flush (attrs <> dashes <> space <> attrs <> cr <> text str <>
            cr <> dashes) <> blankline
@@ -228,6 +248,7 @@ blockToAsciiDoc opts (OrderedList (_start, sty, _delim) items) = do
 blockToAsciiDoc opts (DefinitionList items) = do
   contents <- mapM (definitionListItemToAsciiDoc opts) items
   return $ cat contents <> blankline
+blockToAsciiDoc opts (Div _ bs) = blockListToAsciiDoc opts bs
 
 -- | Convert bullet list item (list of blocks) to asciidoc.
 bulletListItemToAsciiDoc :: WriterOptions -> [Block] -> State WriterState Doc
@@ -328,7 +349,9 @@ inlineToAsciiDoc _ (Math InlineMath str) =
   return $ "latexmath:[$" <> text str <> "$]"
 inlineToAsciiDoc _ (Math DisplayMath str) =
   return $ "latexmath:[\\[" <> text str <> "\\]]"
-inlineToAsciiDoc _ (RawInline _ _) = return empty
+inlineToAsciiDoc _ (RawInline f s)
+  | f == "asciidoc" = return $ text s
+  | otherwise       = return empty
 inlineToAsciiDoc _ (LineBreak) = return $ " +" <> cr
 inlineToAsciiDoc _ Space = return space
 inlineToAsciiDoc opts (Cite _ lst) = inlineListToAsciiDoc opts lst
@@ -343,8 +366,8 @@ inlineToAsciiDoc opts (Link txt (src, _tit)) = do
                   else empty
   let srcSuffix = if isPrefixOf "mailto:" src then drop 7 src else src
   let useAuto = case txt of
-                      [Code _ s] | s == srcSuffix -> True
-                      _                           -> False
+                      [Str s] | escapeURI s == srcSuffix -> True
+                      _                                  -> False
   return $ if useAuto
               then text srcSuffix
               else prefix <> text src <> "[" <> linktext <> "]"
@@ -365,3 +388,4 @@ inlineToAsciiDoc opts (Note [Plain inlines]) = do
   return $ text "footnote:[" <> contents <> "]"
 -- asciidoc can't handle blank lines in notes
 inlineToAsciiDoc _ (Note _) = return "[multiblock footnote omitted]"
+inlineToAsciiDoc opts (Span _ ils) = inlineListToAsciiDoc opts ils

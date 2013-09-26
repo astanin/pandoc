@@ -1,6 +1,7 @@
-{-# LANGUAGE DeriveDataTypeable #-}
+{-# LANGUAGE DeriveDataTypeable, CPP, MultiParamTypeClasses,
+    FlexibleContexts #-}
 {-
-Copyright (C) 2006-2010 John MacFarlane <jgm@berkeley.edu>
+Copyright (C) 2006-2013 John MacFarlane <jgm@berkeley.edu>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -19,7 +20,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 {- |
    Module      : Text.Pandoc.Shared
-   Copyright   : Copyright (C) 2006-2010 John MacFarlane
+   Copyright   : Copyright (C) 2006-2013 John MacFarlane
    License     : GNU GPL, version 2 or above
 
    Maintainer  : John MacFarlane <jgm@berkeley.edu>
@@ -60,12 +61,17 @@ module Text.Pandoc.Shared (
                      uniqueIdent,
                      isHeaderBlock,
                      headerShift,
+                     isTightList,
+                     addMetaField,
+                     makeMeta,
                      -- * TagSoup HTML handling
                      renderTags',
                      -- * File handling
                      inDirectory,
-                     findDataFile,
                      readDataFile,
+                     readDataFileUTF8,
+                     fetchItem,
+                     openURL,
                      -- * Error handling
                      err,
                      warn,
@@ -74,8 +80,9 @@ module Text.Pandoc.Shared (
                     ) where
 
 import Text.Pandoc.Definition
+import Text.Pandoc.Walk
 import Text.Pandoc.Generic
-import Text.Pandoc.Builder (Blocks)
+import Text.Pandoc.Builder (Blocks, ToMetaValue(..))
 import qualified Text.Pandoc.Builder as B
 import qualified Text.Pandoc.UTF8 as UTF8
 import System.Environment (getProgName)
@@ -83,19 +90,42 @@ import System.Exit (exitWith, ExitCode(..))
 import Data.Char ( toLower, isLower, isUpper, isAlpha,
                    isLetter, isDigit, isSpace )
 import Data.List ( find, isPrefixOf, intercalate )
-import Network.URI ( escapeURIString )
+import qualified Data.Map as M
+import Network.URI ( escapeURIString, isAbsoluteURI, unEscapeString )
 import System.Directory
-import System.FilePath ( (</>) )
+import Text.Pandoc.MIME (getMimeType)
+import System.FilePath ( (</>), takeExtension, dropExtension )
 import Data.Generics (Typeable, Data)
 import qualified Control.Monad.State as S
-import Control.Monad (msum)
-import Paths_pandoc (getDataFileName)
+import qualified Control.Exception as E
+import Control.Monad (msum, unless)
 import Text.Pandoc.Pretty (charWidth)
 import System.Locale (defaultTimeLocale)
 import Data.Time
 import System.IO (stderr)
 import Text.HTML.TagSoup (renderTagsOptions, RenderOptions(..), Tag(..),
          renderOptions)
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as B8
+import Text.Pandoc.Compat.Monoid
+
+#ifdef EMBED_DATA_FILES
+import Text.Pandoc.Data (dataFiles)
+import System.FilePath ( joinPath, splitDirectories )
+#else
+import Paths_pandoc (getDataFileName)
+#endif
+#ifdef HTTP_CONDUIT
+import Data.ByteString.Lazy (toChunks)
+import Network.HTTP.Conduit (httpLbs, parseUrl, withManager,
+                             responseBody, responseHeaders)
+import Network.HTTP.Types.Header ( hContentType)
+#else
+import Network.URI (parseURI)
+import Network.HTTP (findHeader, rspBody,
+                     RequestMethod(..), HeaderName(..), mkRequest)
+import Network.Browser (browse, setAllowRedirects, setOutHandler, request)
+#endif
 
 --
 -- List processing
@@ -354,9 +384,11 @@ consolidateInlines (Code a1 x : Code a2 y : zs) | a1 == a2 =
 consolidateInlines (x : xs) = x : consolidateInlines xs
 consolidateInlines [] = []
 
--- | Convert list of inlines to a string with formatting removed.
-stringify :: [Inline] -> String
-stringify = queryWith go
+-- | Convert pandoc structure to a string with formatting removed.
+-- Footnotes are skipped (since we don't want their contents in link
+-- labels).
+stringify :: Walkable Inline a => a -> String
+stringify = query go . walk deNote
   where go :: Inline -> [Char]
         go Space = " "
         go (Str x) = x
@@ -364,6 +396,8 @@ stringify = queryWith go
         go (Math _ x) = x
         go LineBreak = " "
         go _ = ""
+        deNote (Note _) = Str ""
+        deNote x = x
 
 -- | Change final list item from @Para@ to @Plain@ if the list contains
 -- no other @Para@ blocks.
@@ -402,9 +436,32 @@ isPara _        = False
 
 -- | Data structure for defining hierarchical Pandoc documents
 data Element = Blk Block
-             | Sec Int [Int] String [Inline] [Element]
-             --    lvl  num ident  label    contents
+             | Sec Int [Int] Attr [Inline] [Element]
+             --    lvl  num attributes label    contents
              deriving (Eq, Read, Show, Typeable, Data)
+
+instance Walkable Inline Element where
+  walk f (Blk x) = Blk (walk f x)
+  walk f (Sec lev nums attr ils elts) = Sec lev nums attr (walk f ils) (walk f elts)
+  walkM f (Blk x) = Blk `fmap` walkM f x
+  walkM f (Sec lev nums attr ils elts) = do
+    ils' <- walkM f ils
+    elts' <- walkM f elts
+    return $ Sec lev nums attr ils' elts'
+  query f (Blk x) = query f x
+  query f (Sec _ _ _ ils elts) = query f ils <> query f elts
+
+instance Walkable Block Element where
+  walk f (Blk x) = Blk (walk f x)
+  walk f (Sec lev nums attr ils elts) = Sec lev nums attr (walk f ils) (walk f elts)
+  walkM f (Blk x) = Blk `fmap` walkM f x
+  walkM f (Sec lev nums attr ils elts) = do
+    ils' <- walkM f ils
+    elts' <- walkM f elts
+    return $ Sec lev nums attr ils' elts'
+  query f (Blk x) = query f x
+  query f (Sec _ _ _ ils elts) = query f ils <> query f elts
+
 
 -- | Convert Pandoc inline list to plain text identifier.  HTML
 -- identifiers must start with a letter, and may contain only
@@ -420,28 +477,29 @@ inlineListToIdentifier =
 
 -- | Convert list of Pandoc blocks into (hierarchical) list of Elements
 hierarchicalize :: [Block] -> [Element]
-hierarchicalize blocks = S.evalState (hierarchicalizeWithIds blocks) ([],[])
+hierarchicalize blocks = S.evalState (hierarchicalizeWithIds blocks) []
 
-hierarchicalizeWithIds :: [Block] -> S.State ([Int],[String]) [Element]
+hierarchicalizeWithIds :: [Block] -> S.State [Int] [Element]
 hierarchicalizeWithIds [] = return []
-hierarchicalizeWithIds ((Header level title'):xs) = do
-  (lastnum, usedIdents) <- S.get
-  let ident = uniqueIdent title' usedIdents
+hierarchicalizeWithIds ((Header level attr@(_,classes,_) title'):xs) = do
+  lastnum <- S.get
   let lastnum' = take level lastnum
-  let newnum = if length lastnum' >= level
-                  then init lastnum' ++ [last lastnum' + 1]
-                  else lastnum ++ replicate (level - length lastnum - 1) 0 ++ [1]
-  S.put (newnum, (ident : usedIdents))
+  let newnum = case length lastnum' of
+                    x | "unnumbered" `elem` classes -> []
+                      | x >= level -> init lastnum' ++ [last lastnum' + 1]
+                      | otherwise -> lastnum ++
+                           replicate (level - length lastnum - 1) 0 ++ [1]
+  unless (null newnum) $ S.put newnum
   let (sectionContents, rest) = break (headerLtEq level) xs
   sectionContents' <- hierarchicalizeWithIds sectionContents
   rest' <- hierarchicalizeWithIds rest
-  return $ Sec level newnum ident title' sectionContents' : rest'
+  return $ Sec level newnum attr title' sectionContents' : rest'
 hierarchicalizeWithIds (x:rest) = do
   rest' <- hierarchicalizeWithIds rest
   return $ (Blk x) : rest'
 
 headerLtEq :: Int -> Block -> Bool
-headerLtEq level (Header l _) = l <= level
+headerLtEq level (Header l _ _) = l <= level
 headerLtEq _ _ = False
 
 -- | Generate a unique identifier from a list of inlines.
@@ -460,15 +518,42 @@ uniqueIdent title' usedIdents =
 
 -- | True if block is a Header block.
 isHeaderBlock :: Block -> Bool
-isHeaderBlock (Header _ _) = True
+isHeaderBlock (Header _ _ _) = True
 isHeaderBlock _ = False
 
 -- | Shift header levels up or down.
 headerShift :: Int -> Pandoc -> Pandoc
-headerShift n = bottomUp shift
+headerShift n = walk shift
   where shift :: Block -> Block
-        shift (Header level inner) = Header (level + n) inner
-        shift x                    = x
+        shift (Header level attr inner) = Header (level + n) attr inner
+        shift x                         = x
+
+-- | Detect if a list is tight.
+isTightList :: [[Block]] -> Bool
+isTightList = and . map firstIsPlain
+  where firstIsPlain (Plain _ : _) = True
+        firstIsPlain _             = False
+
+-- | Set a field of a 'Meta' object.  If the field already has a value,
+-- convert it into a list with the new value appended to the old value(s).
+addMetaField :: ToMetaValue a
+             => String
+             -> a
+             -> Meta
+             -> Meta
+addMetaField key val (Meta meta) =
+  Meta $ M.insertWith combine key (toMetaValue val) meta
+  where combine newval (MetaList xs) = MetaList (xs ++ [newval])
+        combine newval x             = MetaList [x, newval]
+
+-- | Create 'Meta' from old-style title, authors, date.  This is
+-- provided to ease the transition from the old API.
+makeMeta :: [Inline] -> [[Inline]] -> [Inline] -> Meta
+makeMeta title authors date =
+      addMetaField "title" (B.fromList title)
+    $ addMetaField "author" (map B.fromList authors)
+    $ addMetaField "date" (B.fromList date)
+    $ nullMeta
 
 --
 -- TagSoup HTML handling
@@ -499,20 +584,83 @@ inDirectory path action = do
   setCurrentDirectory oldDir
   return result
 
--- | Get file path for data file, either from specified user data directory,
--- or, if not found there, from Cabal data directory.
-findDataFile :: Maybe FilePath -> FilePath -> IO FilePath
-findDataFile Nothing f = getDataFileName f
-findDataFile (Just u) f = do
-  ex <- doesFileExist (u </> f)
-  if ex
-     then return (u </> f)
-     else getDataFileName f
+readDefaultDataFile :: FilePath -> IO BS.ByteString
+readDefaultDataFile fname =
+#ifdef EMBED_DATA_FILES
+  case lookup (makeCanonical fname) dataFiles of
+    Nothing       -> err 97 $ "Could not find data file " ++ fname
+    Just contents -> return contents
+  where makeCanonical = joinPath . transformPathParts . splitDirectories
+        transformPathParts = reverse . foldl go []
+        go as     "."  = as
+        go (_:as) ".." = as
+        go as     x    = x : as
+#else
+  getDataFileName ("data" </> fname) >>= checkExistence >>= BS.readFile
+   where checkExistence fn = do
+           exists <- doesFileExist fn
+           if exists
+              then return fn
+              else err 97 ("Could not find data file " ++ fname)
+#endif
 
 -- | Read file from specified user data directory or, if not found there, from
 -- Cabal data directory.
-readDataFile :: Maybe FilePath -> FilePath -> IO String
-readDataFile userDir fname = findDataFile userDir fname >>= UTF8.readFile
+readDataFile :: Maybe FilePath -> FilePath -> IO BS.ByteString
+readDataFile Nothing fname = readDefaultDataFile fname
+readDataFile (Just userDir) fname = do
+  exists <- doesFileExist (userDir </> fname)
+  if exists
+     then BS.readFile (userDir </> fname)
+     else readDefaultDataFile fname
+
+-- | Same as 'readDataFile' but returns a String instead of a ByteString.
+readDataFileUTF8 :: Maybe FilePath -> FilePath -> IO String
+readDataFileUTF8 userDir fname =
+  UTF8.toString `fmap` readDataFile userDir fname
+
+-- | Fetch an image or other item from the local filesystem or the net.
+-- Returns raw content and maybe mime type.
+fetchItem :: Maybe String -> String
+          -> IO (Either E.SomeException (BS.ByteString, Maybe String))
+fetchItem sourceURL s
+  | isAbsoluteURI s = openURL s
+  | otherwise       = case sourceURL of
+                           Just u  -> openURL (u ++ "/" ++ s)
+                           Nothing -> E.try readLocalFile
+  where readLocalFile = do
+          let mime = case takeExtension s of
+                          ".gz" -> getMimeType $ dropExtension s
+                          x     -> getMimeType x
+          cont <- BS.readFile s
+          return (cont, mime)
+
+-- | Read from a URL and return raw data and maybe mime type.
+openURL :: String -> IO (Either E.SomeException (BS.ByteString, Maybe String))
+openURL u
+  | "data:" `isPrefixOf` u =
+    let mime     = takeWhile (/=',') $ drop 5 u
+        contents = B8.pack $ unEscapeString $ drop 1 $ dropWhile (/=',') u
+    in  return $ Right (contents, Just mime)
+#ifdef HTTP_CONDUIT
+  | otherwise = E.try $ do
+     req <- parseUrl u
+     resp <- withManager $ httpLbs req
+     return (BS.concat $ toChunks $ responseBody resp,
+             UTF8.toString `fmap` lookup hContentType (responseHeaders resp))
+#else
+  | otherwise = E.try $ getBodyAndMimeType `fmap` browse
+              (do S.liftIO $ UTF8.hPutStrLn stderr $ "Fetching " ++ u ++ "..."
+                  setOutHandler $ const (return ())
+                  setAllowRedirects True
+                  request (getRequest' u'))
+  where getBodyAndMimeType (_, r) = (rspBody r, findHeader HdrContentType r)
+        getRequest' uriString = case parseURI uriString of
+                                   Nothing -> error ("Not a valid URL: " ++
+                                                        uriString)
+                                   Just v  -> mkRequest GET v
+        u' = escapeURIString (/= '|') u  -- pipes are rejected by Network.URI
+#endif
 
 --
 -- Error reporting

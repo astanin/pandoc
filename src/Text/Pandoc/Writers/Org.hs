@@ -34,8 +34,9 @@ module Text.Pandoc.Writers.Org ( writeOrg) where
 import Text.Pandoc.Definition
 import Text.Pandoc.Options
 import Text.Pandoc.Shared
+import Text.Pandoc.Writers.Shared
 import Text.Pandoc.Pretty
-import Text.Pandoc.Templates (renderTemplate)
+import Text.Pandoc.Templates (renderTemplate')
 import Data.List ( intersect, intersperse, transpose )
 import Control.Monad.State
 import Control.Applicative ( (<$>) )
@@ -58,27 +59,25 @@ writeOrg opts document =
 
 -- | Return Org representation of document.
 pandocToOrg :: Pandoc -> State WriterState String
-pandocToOrg (Pandoc (Meta tit auth dat) blocks) = do
+pandocToOrg (Pandoc meta blocks) = do
   opts <- liftM stOptions get
-  title <- titleToOrg tit
-  authors <- mapM inlineListToOrg auth
-  date <- inlineListToOrg dat
+  let colwidth = if writerWrapText opts
+                    then Just $ writerColumns opts
+                    else Nothing
+  metadata <- metaToJSON opts
+               (fmap (render colwidth) . blockListToOrg)
+               (fmap (render colwidth) . inlineListToOrg)
+               meta
   body <- blockListToOrg blocks
   notes <- liftM (reverse . stNotes) get >>= notesToOrg
   -- note that the notes may contain refs, so we do them first
   hasMath <- liftM stHasMath get
-  let colwidth = if writerWrapText opts
-                    then Just $ writerColumns opts
-                    else Nothing
   let main = render colwidth $ foldl ($+$) empty $ [body, notes]
-  let context = writerVariables opts ++
-                [ ("body", main)
-                , ("title", render Nothing title)
-                , ("date", render Nothing date) ] ++
-                [ ("math", "yes") | hasMath ] ++
-                [ ("author", render Nothing a) | a <- authors ]
+  let context = defField "body" main
+              $ defField "math" hasMath
+              $ metadata
   if writerStandalone opts
-     then return $ renderTemplate context $ writerTemplate opts
+     then return $ renderTemplate' (writerTemplate opts) context
      else return main
 
 -- | Return Org representation of notes.
@@ -103,18 +102,21 @@ escapeString = escapeStringUsing $
                , ('\x2026',"...")
                ] ++ backslashEscapes "^_"
 
-titleToOrg :: [Inline] -> State WriterState Doc
-titleToOrg [] = return empty
-titleToOrg lst = do
-  contents <- inlineListToOrg lst
-  return $ "#+TITLE: " <> contents
-
 -- | Convert Pandoc block element to Org.
 blockToOrg :: Block         -- ^ Block element
            -> State WriterState Doc
 blockToOrg Null = return empty
+blockToOrg (Div attrs bs) = do
+  contents <- blockListToOrg bs
+  let startTag = tagWithAttrs "div" attrs
+  let endTag = text "</div>"
+  return $ blankline $$ "#+BEGIN_HTML" $$
+           nest 2 startTag $$ "#+END_HTML" $$ blankline $$
+           contents $$ blankline $$ "#+BEGIN_HTML" $$
+           nest 2 endTag $$ "#+END_HTML" $$ blankline
 blockToOrg (Plain inlines) = inlineListToOrg inlines
-blockToOrg (Para [Image txt (src,tit)]) = do
+-- title beginning with fig: indicates that the image is a figure
+blockToOrg (Para [Image txt (src,'f':'i':'g':':':tit)]) = do
   capt <- if null txt
              then return empty
              else (\c -> "#+CAPTION: " <> c <> blankline) `fmap`
@@ -131,7 +133,7 @@ blockToOrg (RawBlock f str) | f == "org" || f == "latex" || f == "tex" =
   return $ text str
 blockToOrg (RawBlock _ _) = return empty
 blockToOrg HorizontalRule = return $ blankline $$ "--------------" $$ blankline
-blockToOrg (Header level inlines) = do
+blockToOrg (Header level _ inlines) = do
   contents <- inlineListToOrg inlines
   let headerStr = text $ if level > 999 then " " else replicate level '*'
   return $ headerStr <> " " <> contents <> blankline
@@ -235,6 +237,8 @@ inlineListToOrg lst = mapM inlineToOrg lst >>= return . hcat
 
 -- | Convert Pandoc inline element to Org.
 inlineToOrg :: Inline -> State WriterState Doc
+inlineToOrg (Span _ lst) =
+  inlineListToOrg lst
 inlineToOrg (Emph lst) = do
   contents <- inlineListToOrg lst
   return $ "/" <> contents <> "/"
@@ -271,7 +275,7 @@ inlineToOrg (LineBreak) = return cr -- there's no line break in Org
 inlineToOrg Space = return space
 inlineToOrg (Link txt (src, _)) = do
   case txt of
-        [Code _ x] | x == src ->  -- autolink
+        [Str x] | escapeURI x == src ->  -- autolink
              do modify $ \s -> s{ stLinks = True }
                 return $ "[[" <> text x <> "]]"
         _ -> do contents <- inlineListToOrg txt

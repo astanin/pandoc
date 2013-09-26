@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedStrings, CPP #-}
 {-
 Copyright (C) 2012 John MacFarlane <jgm@berkeley.edu>
 
@@ -28,28 +28,75 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 Conversion of LaTeX documents to PDF.
 -}
-module Text.Pandoc.PDF ( tex2pdf ) where
+module Text.Pandoc.PDF ( makePDF ) where
 
 import System.IO.Temp
 import Data.ByteString.Lazy (ByteString)
 import qualified Data.ByteString.Lazy as B
 import qualified Data.ByteString.Lazy.Char8 as BC
+import qualified Data.ByteString as BS
 import System.Exit (ExitCode (..))
 import System.FilePath
 import System.Directory
-import System.Process
-import Control.Exception (evaluate)
-import System.IO (hClose)
-import Control.Concurrent (putMVar, takeMVar, newEmptyMVar, forkIO)
-import Text.Pandoc.UTF8 as UTF8
+import System.Environment
 import Control.Monad (unless)
 import Data.List (isInfixOf)
+import qualified Data.ByteString.Base64 as B64
+import qualified Text.Pandoc.UTF8 as UTF8
+import Text.Pandoc.Definition
+import Text.Pandoc.Walk (walkM)
+import Text.Pandoc.Shared (fetchItem, warn)
+import Text.Pandoc.Options (WriterOptions(..))
+import Text.Pandoc.MIME (extensionFromMimeType)
+import Text.Pandoc.Process (pipeProcess)
+import qualified Data.ByteString.Lazy as BL
 
-tex2pdf :: String       -- ^ tex program (pdflatex, lualatex, xelatex)
-        -> String       -- ^ latex source
+withTempDir :: String -> (FilePath -> IO a) -> IO a
+withTempDir =
+#ifdef _WINDOWS
+  withTempDirectory "."
+#else
+  withSystemTempDirectory
+#endif
+
+makePDF :: String              -- ^ pdf creator (pdflatex, lualatex, xelatex)
+        -> (WriterOptions -> Pandoc -> String)  -- ^ writer
+        -> WriterOptions       -- ^ options
+        -> Pandoc              -- ^ document
         -> IO (Either ByteString ByteString)
-tex2pdf program source = withSystemTempDirectory "tex2pdf" $ \tmpdir ->
+makePDF program writer opts doc = withTempDir "tex2pdf." $ \tmpdir -> do
+  doc' <- handleImages (writerSourceURL opts) tmpdir doc
+  let source = writer opts doc'
   tex2pdf' tmpdir program source
+
+handleImages :: Maybe String  -- ^ source base URL
+             -> FilePath      -- ^ temp dir to store images
+             -> Pandoc        -- ^ document
+             -> IO Pandoc
+handleImages baseURL tmpdir = walkM (handleImage' baseURL tmpdir)
+
+handleImage' :: Maybe String
+             -> FilePath
+             -> Inline
+             -> IO Inline
+handleImage' baseURL tmpdir (Image ils (src,tit)) = do
+    exists <- doesFileExist src
+    if exists
+       then return $ Image ils (src,tit)
+       else do
+         res <- fetchItem baseURL src
+         case res of
+              Right (contents, Just mime) -> do
+                let ext = maybe (takeExtension src) id $
+                          extensionFromMimeType mime
+                let basename = UTF8.toString $ B64.encode $ UTF8.fromString src
+                let fname = tmpdir </> basename <.> ext
+                BS.writeFile fname contents
+                return $ Image ils (fname,tit)
+              _ -> do
+                warn $ "Could not find image `" ++ src ++ "', skipping..."
+                return $ Image ils (src,tit)
+handleImage' _ _ x = return x
 
 tex2pdf' :: FilePath                        -- ^ temp directory for output
          -> String                          -- ^ tex program
@@ -62,8 +109,14 @@ tex2pdf' tmpDir program source = do
   (exit, log', mbPdf) <- runTeXProgram program numruns tmpDir source
   let msg = "Error producing PDF from TeX source."
   case (exit, mbPdf) of
-       (ExitFailure _, _)      -> return $ Left $
-                                     msg <> "\n" <> extractMsg log'
+       (ExitFailure _, _)      -> do
+          let logmsg = extractMsg log'
+          let extramsg =
+                case logmsg of
+                     x | "! Package inputenc Error" `BC.isPrefixOf` x ->
+                           "\nTry running pandoc with --latex-engine=xelatex."
+                     _ -> ""
+          return $ Left $ msg <> "\n" <> extractMsg log' <> extramsg
        (ExitSuccess, Nothing)  -> return $ Left msg
        (ExitSuccess, Just pdf) -> return $ Right pdf
 
@@ -94,7 +147,12 @@ runTeXProgram program runsLeft tmpDir source = do
     unless exists $ UTF8.writeFile file source
     let programArgs = ["-halt-on-error", "-interaction", "nonstopmode",
          "-output-directory", tmpDir, file]
-    (exit, out, err) <- readCommand program programArgs
+    env' <- getEnvironment
+    let texinputs = maybe (tmpDir ++ ":") ((tmpDir ++ ":") ++)
+          $ lookup "TEXINPUTS" env'
+    let env'' = ("TEXINPUTS", texinputs) :
+                  [(k,v) | (k,v) <- env', k /= "TEXINPUTS"]
+    (exit, out, err) <- pipeProcess (Just env'') program programArgs BL.empty
     if runsLeft > 1
        then runTeXProgram program (runsLeft - 1) tmpDir source
        else do
@@ -105,32 +163,3 @@ runTeXProgram program runsLeft tmpDir source = do
                    else return Nothing
          return (exit, out <> err, pdf)
 
--- utility functions
-
--- Run a command and return exitcode, contents of stdout, and
--- contents of stderr. (Based on
--- 'readProcessWithExitCode' from 'System.Process'.)
-readCommand :: FilePath                            -- ^ command to run
-            -> [String]                            -- ^ any arguments
-            -> IO (ExitCode,ByteString,ByteString) -- ^ exit, stdout, stderr
-readCommand cmd args = do
-    (Just inh, Just outh, Just errh, pid) <-
-        createProcess (proc cmd args){ std_in  = CreatePipe,
-                                       std_out = CreatePipe,
-                                       std_err = CreatePipe }
-    outMVar <- newEmptyMVar
-    -- fork off a thread to start consuming stdout
-    out  <- B.hGetContents outh
-    _ <- forkIO $ evaluate (B.length out) >> putMVar outMVar ()
-    -- fork off a thread to start consuming stderr
-    err  <- B.hGetContents errh
-    _ <- forkIO $ evaluate (B.length err) >> putMVar outMVar ()
-    -- now write and flush any input
-    hClose inh -- done with stdin
-    -- wait on the output
-    takeMVar outMVar
-    takeMVar outMVar
-    hClose outh
-    -- wait on the process
-    ex <- waitForProcess pid
-    return (ex, out, err)

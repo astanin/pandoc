@@ -1,4 +1,4 @@
-{-# LANGUAGE PatternGuards #-}
+{-# LANGUAGE PatternGuards, OverloadedStrings #-}
 {-
 Copyright (C) 2008-2010 Andrea Rossato <andrea.rossato@ing.unitn.it>
 and John MacFarlane.
@@ -33,7 +33,7 @@ module Text.Pandoc.Writers.OpenDocument ( writeOpenDocument ) where
 import Text.Pandoc.Definition
 import Text.Pandoc.Options
 import Text.Pandoc.XML
-import Text.Pandoc.Templates (renderTemplate)
+import Text.Pandoc.Templates (renderTemplate')
 import Text.Pandoc.Readers.TeXMath
 import Text.Pandoc.Pretty
 import Text.Printf ( printf )
@@ -42,6 +42,7 @@ import Control.Arrow ( (***), (>>>) )
 import Control.Monad.State hiding ( when )
 import Data.Char (chr, isDigit)
 import qualified Data.Map as Map
+import Text.Pandoc.Writers.Shared
 
 -- | Auxiliary function to convert Plain block to Para.
 plainToPara :: Block -> Block
@@ -172,34 +173,31 @@ handleSpaces s
 
 -- | Convert Pandoc document to string in OpenDocument format.
 writeOpenDocument :: WriterOptions -> Pandoc -> String
-writeOpenDocument opts (Pandoc (Meta title authors date) blocks) =
-  let ((doc, title', authors', date'),s) = flip runState
-        defaultWriterState $ do
-           title'' <- inlinesToOpenDocument opts title
-           authors'' <- mapM (inlinesToOpenDocument opts) authors
-           date'' <- inlinesToOpenDocument opts date
-           doc'' <- blocksToOpenDocument opts blocks
-           return (doc'', title'', authors'', date'')
-      colwidth = if writerWrapText opts
+writeOpenDocument opts (Pandoc meta blocks) =
+  let colwidth = if writerWrapText opts
                     then Just $ writerColumns opts
                     else Nothing
       render' = render colwidth
-      body'    = render' doc
+      ((body, metadata),s) = flip runState
+        defaultWriterState $ do
+           m <- metaToJSON opts
+                  (fmap (render colwidth) . blocksToOpenDocument opts)
+                  (fmap (render colwidth) . inlinesToOpenDocument opts)
+                  meta
+           b <- render' `fmap` blocksToOpenDocument opts blocks
+           return (b, m)
       styles   = stTableStyles s ++ stParaStyles s ++ stTextStyles s
       listStyle (n,l) = inTags True "text:list-style"
                           [("style:name", "L" ++ show n)] (vcat l)
       listStyles  = map listStyle (stListStyles s)
       automaticStyles = inTagsIndented "office:automatic-styles" $ vcat $
                           reverse $ styles ++ listStyles
-      context = writerVariables opts ++
-                [ ("body", body')
-                , ("automatic-styles", render' automaticStyles)
-                , ("title", render' title')
-                , ("date", render' date') ] ++
-                [ ("author", render' a) | a <- authors' ]
+      context = defField "body" body
+              $ defField "automatic-styles" (render' automaticStyles)
+              $ metadata
   in  if writerStandalone opts
-         then renderTemplate context $ writerTemplate opts
-         else body'
+         then renderTemplate' (writerTemplate opts) context
+         else body
 
 withParagraphStyle :: WriterOptions -> String -> [Block] -> State WriterState Doc
 withParagraphStyle  o s (b:bs)
@@ -287,7 +285,8 @@ blockToOpenDocument :: WriterOptions -> Block -> State WriterState Doc
 blockToOpenDocument o bs
     | Plain          b <- bs = inParagraphTags =<< inlinesToOpenDocument o b
     | Para           b <- bs = inParagraphTags =<< inlinesToOpenDocument o b
-    | Header       i b <- bs = setFirstPara >>
+    | Div _ xs         <- bs = blocksToOpenDocument o xs
+    | Header     i _ b <- bs = setFirstPara >>
                                (inHeaderTags  i =<< inlinesToOpenDocument o b)
     | BlockQuote     b <- bs = setFirstPara >> mkBlockQuote b
     | DefinitionList b <- bs = setFirstPara >> defList b
@@ -297,7 +296,9 @@ blockToOpenDocument o bs
     | Table  c a w h r <- bs = setFirstPara >> table c a w h r
     | HorizontalRule   <- bs = setFirstPara >> return (selfClosingTag "text:p"
                                 [ ("text:style-name", "Horizontal_20_Line") ])
-    | RawBlock _     _ <- bs = return empty
+    | RawBlock f     s <- bs = if f == "opendocument"
+                                  then preformatted s
+                                  else return empty
     | Null             <- bs = return empty
     | otherwise              = return empty
     where
@@ -362,6 +363,7 @@ inlinesToOpenDocument o l = hcat <$> mapM (inlineToOpenDocument o) l
 inlineToOpenDocument :: WriterOptions -> Inline -> State WriterState Doc
 inlineToOpenDocument o ils
     | Space         <- ils = inTextStyle space
+    | Span _ xs     <- ils = inlinesToOpenDocument o xs
     | LineBreak     <- ils = return $ selfClosingTag "text:line-break" []
     | Str         s <- ils = inTextStyle $ handleSpaces $ escapeStringForXML s
     | Emph        l <- ils = withTextStyle Italic $ inlinesToOpenDocument o l
@@ -371,18 +373,18 @@ inlineToOpenDocument o ils
     | Subscript   l <- ils = withTextStyle Sub    $ inlinesToOpenDocument o l
     | SmallCaps   l <- ils = withTextStyle SmallC $ inlinesToOpenDocument o l
     | Quoted    t l <- ils = inQuotes t <$> inlinesToOpenDocument o l
-    | Code      _ s <- ils = preformatted s
+    | Code      _ s <- ils = withTextStyle Pre $ inTextStyle $ preformatted s
     | Math      _ s <- ils = inlinesToOpenDocument o (readTeXMath s)
     | Cite      _ l <- ils = inlinesToOpenDocument o l
-    | RawInline "opendocument" s <- ils = preformatted s
-    | RawInline "html" s <- ils = preformatted s  -- for backwards compat.
-    | RawInline _ _ <- ils = return empty
+    | RawInline f s <- ils = if f == "opendocument" || f == "html"
+                                then withTextStyle Pre $ inTextStyle $ preformatted s
+                                else return empty
     | Link  l (s,t) <- ils = mkLink s t <$> inlinesToOpenDocument o l
     | Image _ (s,t) <- ils = return $ mkImg  s t
     | Note        l <- ils = mkNote l
     | otherwise            = return empty
     where
-      preformatted = return . inSpanTags "Teletype" . handleSpaces . escapeStringForXML
+      preformatted s = handleSpaces $ escapeStringForXML s
       mkLink   s t = inTags False "text:a" [ ("xlink:type" , "simple")
                                            , ("xlink:href" , s       )
                                            , ("office:name", t       )
@@ -459,7 +461,8 @@ tableStyle :: Int -> [(Char,Double)] -> Doc
 tableStyle num wcs =
     let tableId        = "Table" ++ show (num + 1)
         table          = inTags True "style:style"
-                         [("style:name", tableId)] $
+                         [("style:name", tableId)
+                         ,("style:family", "table")] $
                          selfClosingTag "style:table-properties"
                          [("table:align"    , "center")]
         colStyle (c,0) = selfClosingTag "style:style"
@@ -491,14 +494,16 @@ paraStyle parent attrs = do
       tight     = if t then [ ("fo:margin-top"          , "0in"    )
                             , ("fo:margin-bottom"       , "0in"    )]
                        else []
-      indent    = when (i /= 0 || b || t) $
-                  selfClosingTag "style:paragraph-properties" $
-                           [ ("fo:margin-left"         , indentVal)
+      indent    = if (i /= 0 || b) 
+                      then [ ("fo:margin-left"         , indentVal)
                            , ("fo:margin-right"        , "0in"    )
                            , ("fo:text-indent"         , "0in"    )
                            , ("style:auto-text-indent" , "false"  )]
-                         ++ tight
-  addParaStyle $ inTags True "style:style" (styleAttr ++ attrs) indent
+                      else []
+      attributes = indent ++ tight
+      paraProps = when (not $ null attributes) $
+                    selfClosingTag "style:paragraph-properties" attributes
+  addParaStyle $ inTags True "style:style" (styleAttr ++ attrs) paraProps
   return pn
 
 paraListStyle :: Int -> State WriterState Int
@@ -519,7 +524,8 @@ paraTableStyles t s (a:xs)
                      [ ("fo:text-align", x)
                      , ("style:justify-single-word", "false")]
 
-data TextStyle = Italic | Bold | Strike | Sub | Sup | SmallC deriving ( Eq,Ord )
+data TextStyle = Italic | Bold | Strike | Sub | Sup | SmallC | Pre 
+               deriving ( Eq,Ord )
 
 textStyleAttr :: TextStyle -> [(String,String)]
 textStyleAttr s
@@ -533,5 +539,8 @@ textStyleAttr s
     | Sub    <- s = [("style:text-position"          ,"sub 58%"   )]
     | Sup    <- s = [("style:text-position"          ,"super 58%" )]
     | SmallC <- s = [("fo:font-variant"              ,"small-caps")]
+    | Pre    <- s = [("style:font-name"              ,"Courier New")
+                    ,("style:font-name-asian"        ,"Courier New")
+                    ,("style:font-name-complex"      ,"Courier New")]
     | otherwise   = []
 

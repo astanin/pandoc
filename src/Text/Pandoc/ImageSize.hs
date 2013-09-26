@@ -29,16 +29,17 @@ Portability : portable
 Functions for determining the size of a PNG, JPEG, or GIF image.
 -}
 module Text.Pandoc.ImageSize ( ImageType(..), imageType, imageSize,
-                    sizeInPixels, sizeInPoints, readImageSize ) where
-import Data.ByteString.Lazy (ByteString, unpack)
-import qualified Data.ByteString.Lazy.Char8 as B
+                    sizeInPixels, sizeInPoints ) where
+import Data.ByteString (ByteString, unpack)
+import qualified Data.ByteString.Char8 as B
 import Control.Monad
 import Data.Bits
+import Text.Pandoc.Shared (safeRead)
 
 -- quick and dirty functions to get image sizes
 -- algorithms borrowed from wwwis.pl
 
-data ImageType = Png | Gif | Jpeg deriving Show
+data ImageType = Png | Gif | Jpeg | Pdf | Eps deriving Show
 
 data ImageSize = ImageSize{
                      pxX   :: Integer
@@ -48,14 +49,15 @@ data ImageSize = ImageSize{
                    } deriving (Read, Show, Eq)
 
 
-readImageSize :: FilePath -> IO (Maybe ImageSize)
-readImageSize fp = imageSize `fmap` B.readFile fp
-
 imageType :: ByteString -> Maybe ImageType
 imageType img = case B.take 4 img of
                      "\x89\x50\x4e\x47" -> return Png
                      "\x47\x49\x46\x38" -> return Gif
                      "\xff\xd8\xff\xe0" -> return Jpeg
+                     "%PDF"             -> return Pdf
+                     "%!PS"
+                       | (B.take 4 $ B.drop 1 $ B.dropWhile (/=' ') img) == "EPSF"
+                                        -> return Eps
                      _                  -> fail "Unknown image type"
 
 imageSize :: ByteString -> Maybe ImageSize
@@ -65,12 +67,31 @@ imageSize img = do
        Png  -> pngSize img
        Gif  -> gifSize img
        Jpeg -> jpegSize img
+       Eps  -> epsSize img
+       Pdf  -> Nothing  -- TODO
 
 sizeInPixels :: ImageSize -> (Integer, Integer)
 sizeInPixels s = (pxX s, pxY s)
 
 sizeInPoints :: ImageSize -> (Integer, Integer)
 sizeInPoints s = (pxX s * 72 `div` dpiX s, pxY s * 72 `div` dpiY s)
+
+epsSize :: ByteString -> Maybe ImageSize
+epsSize img = do
+  let ls = takeWhile ("%" `B.isPrefixOf`) $ B.lines img
+  let ls' = dropWhile (not . ("%%BoundingBox:" `B.isPrefixOf`)) ls
+  case ls' of
+       []    -> mzero
+       (x:_) -> case B.words x of
+                     (_:_:_:ux:uy:[]) -> do
+                        ux' <- safeRead $ B.unpack ux
+                        uy' <- safeRead $ B.unpack uy
+                        return ImageSize{
+                            pxX  = ux'
+                          , pxY  = uy'
+                          , dpiX = 72
+                          , dpiY = 72 }
+                     _ -> mzero
 
 pngSize :: ByteString -> Maybe ImageSize
 pngSize img = do

@@ -1,0 +1,8 @@
+language: haskell
+before_install:
+  - cabal install cabal-dev
+  - 'git clone https://github.com/jgm/pandoc-types && cabal-dev add-source pandoc-types'
+install:
+  - cabal-dev install-deps --enable-tests
+script:
+  - 'cabal-dev configure --enable-tests && cabal-dev build && cabal-dev test'

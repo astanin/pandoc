@@ -32,12 +32,15 @@ module Text.Pandoc.Writers.Man ( writeMan) where
 import Text.Pandoc.Definition
 import Text.Pandoc.Templates
 import Text.Pandoc.Shared
+import Text.Pandoc.Writers.Shared
 import Text.Pandoc.Options
 import Text.Pandoc.Readers.TeXMath
 import Text.Printf ( printf )
 import Data.List ( isPrefixOf, intersperse, intercalate )
 import Text.Pandoc.Pretty
+import Text.Pandoc.Builder (deleteMeta)
 import Control.Monad.State
+import Data.Char ( isDigit )
 
 type Notes = [[Block]]
 data WriterState = WriterState { stNotes  :: Notes
@@ -49,36 +52,41 @@ writeMan opts document = evalState (pandocToMan opts document) (WriterState [] F
 
 -- | Return groff man representation of document.
 pandocToMan :: WriterOptions -> Pandoc -> State WriterState String
-pandocToMan opts (Pandoc (Meta title authors date) blocks) = do
-  titleText <- inlineListToMan opts title
-  authors' <- mapM (inlineListToMan opts) authors
-  date' <- inlineListToMan opts date
+pandocToMan opts (Pandoc meta blocks) = do
   let colwidth = if writerWrapText opts
                     then Just $ writerColumns opts
                     else Nothing
   let render' = render colwidth
-  let (cmdName, rest) = break (== ' ') $ render' titleText
-  let (title', section) = case reverse cmdName of
-                            (')':d:'(':xs) | d `elem` ['0'..'9'] ->
-                                  (text (reverse xs), char d)
-                            xs -> (text (reverse xs), doubleQuotes empty)
-  let description = hsep $
-                    map (doubleQuotes . text . trim) $ splitBy (== '|') rest
+  titleText <- inlineListToMan opts $ docTitle meta
+  let title' = render' titleText
+  let setFieldsFromTitle =
+       case break (== ' ') title' of
+           (cmdName, rest) -> case reverse cmdName of
+                                   (')':d:'(':xs) | isDigit d ->
+                                     defField "title" (reverse xs) .
+                                     defField "section" [d] .
+                                     case splitBy (=='|') rest of
+                                          (ft:hds) ->
+                                            defField "footer" (trim ft) .
+                                            defField "header"
+                                               (trim $ concat hds)
+                                          [] -> id
+                                   _  -> defField "title" title'
+  metadata <- metaToJSON opts
+              (fmap (render colwidth) . blockListToMan opts)
+              (fmap (render colwidth) . inlineListToMan opts)
+              $ deleteMeta "title" meta
   body <- blockListToMan opts blocks
   notes <- liftM stNotes get
   notes' <- notesToMan opts (reverse notes)
   let main = render' $ body $$ notes' $$ text ""
   hasTables <- liftM stHasTables get
-  let context  = writerVariables opts ++
-                 [ ("body", main)
-                 , ("title", render' title')
-                 , ("section", render' section)
-                 , ("date", render' date')
-                 , ("description", render' description) ] ++
-                 [ ("has-tables", "yes") | hasTables ] ++
-                 [ ("author", render' a) | a <- authors' ]
+  let context = defField "body" main
+              $ setFieldsFromTitle
+              $ defField "has-tables" hasTables
+              $ metadata
   if writerStandalone opts
-     then return $ renderTemplate context $ writerTemplate opts
+     then return $ renderTemplate' (writerTemplate opts) context
      else return main
 
 -- | Return man representation of notes.
@@ -152,16 +160,18 @@ blockToMan :: WriterOptions -- ^ Options
                 -> Block         -- ^ Block element
                 -> State WriterState Doc
 blockToMan _ Null = return empty
+blockToMan opts (Div _ bs) = blockListToMan opts bs
 blockToMan opts (Plain inlines) =
   liftM vcat $ mapM (inlineListToMan opts) $ splitSentences inlines
 blockToMan opts (Para inlines) = do
   contents <- liftM vcat $ mapM (inlineListToMan opts) $
     splitSentences inlines
   return $ text ".PP" $$ contents
-blockToMan _ (RawBlock "man" str) = return $ text str
-blockToMan _ (RawBlock _ _) = return empty
+blockToMan _ (RawBlock f str)
+  | f == Format "man" = return $ text str
+  | otherwise         = return empty
 blockToMan _ HorizontalRule = return $ text ".PP" $$ text "   *   *   *   *   *"
-blockToMan opts (Header level inlines) = do
+blockToMan opts (Header level _ inlines) = do
   contents <- inlineListToMan opts inlines
   let heading = case level of
                   1 -> ".SH "
@@ -187,7 +197,7 @@ blockToMan opts (Table caption alignments widths headers rows) =
   modify $ \st -> st{ stHasTables = True }
   let iwidths = if all (== 0) widths
                    then repeat ""
-                   else map (printf "w(%0.2fn)" . (70 *)) widths
+                   else map (printf "w(%0.1fn)" . (70 *)) widths
   -- 78n default width - 8n indent = 70n
   let coldescriptions = text $ intercalate " "
                         (zipWith (\align width -> aligncode align ++ width)
@@ -292,6 +302,7 @@ inlineListToMan opts lst = mapM (inlineToMan opts) lst >>= (return . hcat)
 
 -- | Convert Pandoc inline element to man.
 inlineToMan :: WriterOptions -> Inline -> State WriterState Doc
+inlineToMan opts (Span _ ils) = inlineListToMan opts ils
 inlineToMan opts (Emph lst) = do
   contents <- inlineListToMan opts lst
   return $ text "\\f[I]" <> contents <> text "\\f[]"
@@ -323,8 +334,9 @@ inlineToMan opts (Math InlineMath str) = inlineListToMan opts $ readTeXMath str
 inlineToMan opts (Math DisplayMath str) = do
   contents <- inlineListToMan opts $ readTeXMath str
   return $ cr <> text ".RS" $$ contents $$ text ".RE"
-inlineToMan _ (RawInline "man" str) = return $ text str
-inlineToMan _ (RawInline _ _) = return empty
+inlineToMan _ (RawInline f str)
+  | f == Format "man" = return $ text str
+  | otherwise         = return empty
 inlineToMan _ (LineBreak) = return $
   cr <> text ".PD 0" $$ text ".P" $$ text ".PD" <> cr
 inlineToMan _ Space = return space
@@ -332,8 +344,9 @@ inlineToMan opts (Link txt (src, _)) = do
   linktext <- inlineListToMan opts txt
   let srcSuffix = if isPrefixOf "mailto:" src then drop 7 src else src
   return $ case txt of
-           [Code _ s]
-             | s == srcSuffix -> char '<' <> text srcSuffix <> char '>'
+           [Str s]
+             | escapeURI s == srcSuffix ->
+                                 char '<' <> text srcSuffix <> char '>'
            _                  -> linktext <> text " (" <> text src <> char ')'
 inlineToMan opts (Image alternate (source, tit)) = do
   let txt = if (null alternate) || (alternate == [Str ""]) ||

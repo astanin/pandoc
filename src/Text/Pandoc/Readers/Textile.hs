@@ -36,9 +36,7 @@ Implemented and parsed:
  - Inlines : strong, emph, cite, code, deleted, superscript,
    subscript, links
  - footnotes
-
-Implemented but discarded:
- - HTML-specific and CSS-specific attributes
+ - HTML-specific and CSS-specific attributes on headers
 
 Left to be implemented:
  - dimension sign
@@ -54,11 +52,13 @@ TODO : refactor common patterns across readers :
 module Text.Pandoc.Readers.Textile ( readTextile) where
 
 import Text.Pandoc.Definition
+import qualified Text.Pandoc.Builder as B
 import Text.Pandoc.Shared
 import Text.Pandoc.Options
 import Text.Pandoc.Parsing
 import Text.Pandoc.Readers.HTML ( htmlTag, isInlineTag, isBlockTag )
 import Text.Pandoc.Readers.LaTeX ( rawLaTeXInline, rawLaTeXBlock )
+import Text.HTML.TagSoup (parseTags, innerText, fromAttrib, Tag(..))
 import Text.HTML.TagSoup.Match
 import Data.List ( intercalate )
 import Data.Char ( digitToInt, isUpper )
@@ -95,7 +95,7 @@ parseTextile = do
   updateState $ \s -> s { stateNotes = reverse reversedNotes }
   -- now parse it for real...
   blocks <- parseBlocks
-  return $ Pandoc (Meta [] [] []) blocks -- FIXME
+  return $ Pandoc nullMeta blocks -- FIXME
 
 noteMarker :: Parser [Char] ParserState [Char]
 noteMarker = skipMany spaceChar >> string "fn" >> manyTill digit (char '.')
@@ -154,8 +154,10 @@ codeBlockBc = try $ do
 -- | Code Blocks in Textile are between <pre> and </pre>
 codeBlockPre :: Parser [Char] ParserState Block
 codeBlockPre = try $ do
-  htmlTag (tagOpen (=="pre") null)
-  result' <- manyTill anyChar (try $ htmlTag (tagClose (=="pre")) >> blockBreak)
+  (t@(TagOpen _ attrs),_) <- htmlTag (tagOpen (=="pre") (const True))
+  result' <- (innerText . parseTags) `fmap` -- remove internal tags
+               manyTill anyChar (htmlTag (tagClose (=="pre")))
+  optional blanklines
   -- drop leading newline if any
   let result'' = case result' of
                       '\n':xs -> xs
@@ -164,21 +166,27 @@ codeBlockPre = try $ do
   let result''' = case reverse result'' of
                        '\n':_ -> init result''
                        _      -> result''
-  return $ CodeBlock ("",[],[]) result'''
+  let classes = words $ fromAttrib "class" t
+  let ident = fromAttrib "id" t
+  let kvs = [(k,v) | (k,v) <- attrs, k /= "id" && k /= "class"]
+  return $ CodeBlock (ident,classes,kvs) result'''
 
 -- | Header of the form "hN. content" with N in 1..6
 header :: Parser [Char] ParserState Block
 header = try $ do
   char 'h'
   level <- digitToInt <$> oneOf "123456"
-  optional attributes >> char '.' >> whitespace
+  attr <- attributes
+  char '.'
+  whitespace
   name <- normalizeSpaces <$> manyTill inline blockBreak
-  return $ Header level name
+  attr' <- registerHeader attr (B.fromList name)
+  return $ Header level attr' name
 
 -- | Blockquote of the form "bq. content"
 blockQuote :: Parser [Char] ParserState Block
 blockQuote = try $ do
-  string "bq" >> optional attributes >> char '.' >> whitespace
+  string "bq" >> attributes >> char '.' >> whitespace
   BlockQuote . singleton <$> para
 
 -- Horizontal rule
@@ -232,7 +240,7 @@ orderedListItemAtDepth = genericListItemAtDepth '#'
 -- | Common implementation of list items
 genericListItemAtDepth :: Char -> Int -> Parser [Char] ParserState [Block]
 genericListItemAtDepth c depth = try $ do
-  count depth (char c) >> optional attributes >> whitespace
+  count depth (char c) >> attributes >> whitespace
   p <- many listInline
   newline
   sublist <- option [] (singleton <$> anyListAtDepth (depth + 1))
@@ -275,7 +283,7 @@ definitionListItem = try $ do
 -- blocks support, we have to lookAhead for a rawHtmlBlock.
 blockBreak :: Parser [Char] ParserState ()
 blockBreak = try (newline >> blanklines >> return ()) <|>
-              (lookAhead rawHtmlBlock >> return ())
+             try (optional spaces >> lookAhead rawHtmlBlock >> return ())
 
 -- raw content
 
@@ -284,13 +292,13 @@ rawHtmlBlock :: Parser [Char] ParserState Block
 rawHtmlBlock = try $ do
   (_,b) <- htmlTag isBlockTag
   optional blanklines
-  return $ RawBlock "html" b
+  return $ RawBlock (Format "html") b
 
 -- | Raw block of LaTeX content
 rawLaTeXBlock' :: Parser [Char] ParserState Block
 rawLaTeXBlock' = do
   guardEnabled Ext_raw_tex
-  RawBlock "latex" <$> (rawLaTeXBlock <* spaces)
+  RawBlock (Format "latex") <$> (rawLaTeXBlock <* spaces)
 
 
 -- | In textile, paragraphs are separated by blank lines.
@@ -343,7 +351,7 @@ maybeExplicitBlock :: String  -- ^ block tag name
                     -> Parser [Char] ParserState Block -- ^ implicit block
                     -> Parser [Char] ParserState Block
 maybeExplicitBlock name blk = try $ do
-  optional $ try $ string name >> optional attributes >> char '.' >>
+  optional $ try $ string name >> attributes >> char '.' >>
     optional whitespace >> optional endline
   blk
 
@@ -374,6 +382,7 @@ inlineParsers = [ str
                 , link
                 , image
                 , mark
+                , (Str . (:[])) <$> characterReference
                 , smartPunctuation inline
                 , symbol
                 ]
@@ -424,7 +433,7 @@ note = try $ do
 
 -- | Special chars
 markupChars :: [Char]
-markupChars = "\\*#_@~-+^|%=[]"
+markupChars = "\\*#_@~-+^|%=[]&"
 
 -- | Break strings on following chars. Space tab and newline break for
 --  inlines breaking. Open paren breaks for mark. Quote, dash and dot
@@ -480,7 +489,7 @@ endline = try $ do
   return LineBreak
 
 rawHtmlInline :: Parser [Char] ParserState Inline
-rawHtmlInline = RawInline "html" . snd <$> htmlTag isInlineTag
+rawHtmlInline = RawInline (Format "html") . snd <$> htmlTag isInlineTag
 
 -- | Raw LaTeX Inline
 rawLaTeXInline' :: Parser [Char] ParserState Inline
@@ -548,10 +557,32 @@ code2 = do
   Code nullAttr <$> manyTill anyChar (try $ htmlTag $ tagClose (=="tt"))
 
 -- | Html / CSS attributes
-attributes :: Parser [Char] ParserState String
-attributes = choice [ enclosed (char '(') (char ')') anyChar,
-                      enclosed (char '{') (char '}') anyChar,
-                      enclosed (char '[') (char ']') anyChar]
+attributes :: Parser [Char] ParserState Attr
+attributes = (foldl (flip ($)) ("",[],[])) `fmap` many attribute
+
+attribute :: Parser [Char] ParserState (Attr -> Attr)
+attribute = classIdAttr <|> styleAttr <|> langAttr
+
+classIdAttr :: Parser [Char] ParserState (Attr -> Attr)
+classIdAttr = try $ do -- (class class #id)
+  char '('
+  ws <- words `fmap` manyTill anyChar (char ')')
+  case reverse ws of
+       []                      -> return $ \(_,_,keyvals) -> ("",[],keyvals)
+       (('#':ident'):classes') -> return $ \(_,_,keyvals) ->
+                                             (ident',classes',keyvals)
+       classes'                -> return $ \(_,_,keyvals) ->
+                                             ("",classes',keyvals)
+
+styleAttr :: Parser [Char] ParserState (Attr -> Attr)
+styleAttr = do
+  style <- try $ enclosed (char '{') (char '}') anyChar
+  return $ \(id',classes,keyvals) -> (id',classes,("style",style):keyvals)
+
+langAttr :: Parser [Char] ParserState (Attr -> Attr)
+langAttr = do
+  lang <- try $ enclosed (char '[') (char ']') anyChar
+  return $ \(id',classes,keyvals) -> (id',classes,("lang",lang):keyvals)
 
 -- | Parses material surrounded by a parser.
 surrounded :: Parser [Char] st t   -- ^ surrounding parser

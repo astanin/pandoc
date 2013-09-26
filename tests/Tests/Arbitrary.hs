@@ -41,8 +41,8 @@ arbInline :: Int -> Gen Inline
 arbInline n = frequency $ [ (60, liftM Str realString)
                           , (60, return Space)
                           , (10, liftM2 Code arbAttr realString)
-                          , (5,  elements [ RawInline "html" "<a id=\"eek\">"
-                                          , RawInline "latex" "\\my{command}" ])
+                          , (5,  elements [ RawInline (Format "html") "<a id=\"eek\">"
+                                          , RawInline (Format "latex") "\\my{command}" ])
                           ] ++ [ x | x <- nesters, n > 1]
    where nesters = [ (10,  liftM Emph $ arbInlines (n-1))
                    , (10,  liftM Strong $ arbInlines (n-1))
@@ -74,14 +74,14 @@ arbBlock :: Int -> Gen Block
 arbBlock n = frequency $ [ (10, liftM Plain $ arbInlines (n-1))
                          , (15, liftM Para $ arbInlines (n-1))
                          , (5,  liftM2 CodeBlock arbAttr realString)
-                         , (2,  elements [ RawBlock "html"
+                         , (2,  elements [ RawBlock (Format "html")
                                             "<div>\n*&amp;*\n</div>"
-                                         , RawBlock "latex"
+                                         , RawBlock (Format "latex")
                                             "\\begin[opt]{env}\nhi\n{\\end{env}"
                                          ])
                          , (5,  do x1 <- choose (1 :: Int, 6)
                                    x2 <- arbInlines (n-1)
-                                   return (Header x1 x2))
+                                   return (Header x1 nullAttr x2))
                          , (2, return HorizontalRule)
                          ] ++ [x | x <- nesters, n > 0]
    where nesters = [ (5,  liftM BlockQuote $ listOf1 $ arbBlock (n-1))
@@ -150,10 +150,13 @@ instance Arbitrary QuoteType where
 
 instance Arbitrary Meta where
         arbitrary
-          = do x1 <- arbitrary
-               x2 <- liftM (filter (not . null)) arbitrary
-               x3 <- arbitrary
-               return (Meta x1 x2 x3)
+          = do (x1 :: Inlines) <- arbitrary
+               (x2 :: [Inlines]) <- liftM (filter (not . isNull)) arbitrary
+               (x3 :: Inlines) <- arbitrary
+               return $ setMeta "title" x1
+                      $ setMeta "author" x2
+                      $ setMeta "date" x3
+                      $ nullMeta
 
 instance Arbitrary Alignment where
         arbitrary

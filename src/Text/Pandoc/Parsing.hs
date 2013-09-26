@@ -33,6 +33,7 @@ module Text.Pandoc.Parsing ( (>>~),
                              many1Till,
                              notFollowedBy',
                              oneOfStrings,
+                             oneOfStringsCI,
                              spaceChar,
                              nonspaceChar,
                              skipSpaces,
@@ -54,6 +55,7 @@ module Text.Pandoc.Parsing ( (>>~),
                              anyOrderedListMarker,
                              orderedListMarker,
                              charRef,
+                             lineBlockLines,
                              tableWith,
                              widthsFromIndices,
                              gridTableWith,
@@ -73,6 +75,7 @@ module Text.Pandoc.Parsing ( (>>~),
                              SubstTable,
                              Key (..),
                              toKey,
+                             registerHeader,
                              smartPunctuation,
                              withQuoteContext,
                              singleQuoteStart,
@@ -134,10 +137,13 @@ module Text.Pandoc.Parsing ( (>>~),
                              getState,
                              setState,
                              updateState,
+                             SourcePos,
                              getPosition,
                              setPosition,
                              sourceColumn,
                              sourceLine,
+                             setSourceColumn,
+                             setSourceLine,
                              newPos,
                              token
                              )
@@ -145,21 +151,26 @@ where
 
 import Text.Pandoc.Definition
 import Text.Pandoc.Options
-import Text.Pandoc.Builder (Blocks, Inlines)
+import Text.Pandoc.Builder (Blocks, Inlines, rawBlock, HasMeta(..))
+import qualified Text.Pandoc.Builder as B
+import Text.Pandoc.XML (fromEntities)
 import qualified Text.Pandoc.UTF8 as UTF8 (putStrLn)
 import Text.Parsec
 import Text.Parsec.Pos (newPos)
-import Data.Char ( toLower, toUpper, ord, isAscii, isAlphaNum, isDigit, isPunctuation )
+import Data.Char ( toLower, toUpper, ord, chr, isAscii, isAlphaNum, isDigit,
+                   isHexDigit, isSpace )
 import Data.List ( intercalate, transpose )
-import Network.URI ( parseURI, URI (..), isAllowedInURI )
 import Text.Pandoc.Shared
 import qualified Data.Map as M
 import Text.TeXMath.Macros (applyMacros, Macro, parseMacroDefinitions)
-import Text.HTML.TagSoup.Entity ( lookupEntity )
+import Text.Pandoc.Compat.TagSoupEntity ( lookupEntity )
+import Text.Pandoc.Asciify (toAsciiChar)
 import Data.Default
 import qualified Data.Set as Set
 import Control.Monad.Reader
+import Control.Applicative ((*>), (<*), (<$), liftA2)
 import Data.Monoid
+import Data.Maybe (catMaybes)
 
 type Parser t s = Parsec t s
 
@@ -186,7 +197,19 @@ a >>~ b = a >>= \x -> b >> return x
 
 -- | Parse any line of text
 anyLine :: Parser [Char] st [Char]
-anyLine = manyTill anyChar newline
+anyLine = do
+  -- This is much faster than:
+  -- manyTill anyChar newline
+  inp <- getInput
+  pos <- getPosition
+  case break (=='\n') inp of
+       (this, '\n':rest) -> do
+         -- needed to persuade parsec that this won't match an empty string:
+         anyChar
+         setInput rest
+         setPosition $ incSourceLine (setSourceColumn pos 1) 1
+         return this
+       _ -> mzero
 
 -- | Like @manyTill@, but reads at least one item.
 many1Till :: Parser [tok] st a
@@ -207,16 +230,34 @@ notFollowedBy' p  = try $ join $  do  a <- try p
                                   return (return ())
 -- (This version due to Andrew Pimlott on the Haskell mailing list.)
 
--- | Parses one of a list of strings (tried in order).
-oneOfStrings :: [String] -> Parser [Char] st String
-oneOfStrings []   = fail "no strings"
-oneOfStrings strs = do
+oneOfStrings' :: (Char -> Char -> Bool) -> [String] -> Parser [Char] st String
+oneOfStrings' _ []   = fail "no strings"
+oneOfStrings' matches strs = try $ do
   c <- anyChar
-  let strs' = [xs | (x:xs) <- strs, x == c]
+  let strs' = [xs | (x:xs) <- strs, x `matches` c]
   case strs' of
        []  -> fail "not found"
-       z | "" `elem` z -> return [c]
-         | otherwise    -> (c:) `fmap` oneOfStrings strs'
+       _   -> (c:) `fmap` oneOfStrings' matches strs'
+               <|> if "" `elem` strs'
+                      then return [c]
+                      else fail "not found"
+
+-- | Parses one of a list of strings.  If the list contains
+-- two strings one of which is a prefix of the other, the longer
+-- string will be matched if possible.
+oneOfStrings :: [String] -> Parser [Char] st String
+oneOfStrings = oneOfStrings' (==)
+
+-- | Parses one of a list of strings (tried in order), case insensitive.
+oneOfStringsCI :: [String] -> Parser [Char] st String
+oneOfStringsCI = oneOfStrings' ciMatch
+  where ciMatch x y = toLower' x == toLower' y
+        -- this optimizes toLower by checking common ASCII case
+        -- first, before calling the expensive unicode-aware
+        -- function:
+        toLower' c | c >= 'A' && c <= 'Z' = chr (ord c + 32)
+                   | isAscii c = c
+                   | otherwise = toLower c
 
 -- | Parses a space or tab.
 spaceChar :: Parser [Char] st Char
@@ -331,62 +372,84 @@ romanNumeral upperCase = do
 
 -- Parsers for email addresses and URIs
 
-emailChar :: Parser [Char] st Char
-emailChar = alphaNum <|>
-            satisfy (\c -> c == '-' || c == '+' || c == '_' || c == '.')
-
-domainChar :: Parser [Char] st Char
-domainChar = alphaNum <|> char '-'
-
-domain :: Parser [Char] st [Char]
-domain = do
-  first <- many1 domainChar
-  dom <- many1 $ try (char '.' >> many1 domainChar )
-  return $ intercalate "." (first:dom)
-
 -- | Parses an email address; returns original and corresponding
 -- escaped mailto: URI.
 emailAddress :: Parser [Char] st (String, String)
-emailAddress = try $ do
-  firstLetter <- alphaNum
-  restAddr <- many emailChar
-  let addr = firstLetter:restAddr
-  char '@'
-  dom <- domain
-  let full = addr ++ '@':dom
-  return (full, escapeURI $ "mailto:" ++ full)
+emailAddress = try $ liftA2 toResult mailbox (char '@' *> domain)
+ where toResult mbox dom = let full = fromEntities $ mbox ++ '@':dom
+                           in  (full, escapeURI $ "mailto:" ++ full)
+       mailbox           = intercalate "." `fmap` (emailWord `sepby1` dot)
+       domain            = intercalate "." `fmap` (subdomain `sepby1` dot)
+       dot               = char '.'
+       subdomain         = many1 $ alphaNum <|> innerPunct
+       innerPunct        = try (satisfy (\c -> isEmailPunct c || c == '@') <*
+                                 notFollowedBy space)
+       emailWord         = many1 $ satisfy isEmailChar
+       isEmailChar c     = isAlphaNum c || isEmailPunct c
+       isEmailPunct c    = c `elem` "!\"#$%&'*+-/=?^_{|}~;"
+       -- note: sepBy1 from parsec consumes input when sep
+       -- succeeds and p fails, so we use this variant here.
+       sepby1 p sep      = liftA2 (:) p (many (try $ sep >> p))
+
+
+-- Schemes from http://www.iana.org/assignments/uri-schemes.html plus
+-- the unofficial schemes coap, doi, javascript.
+schemes :: [String]
+schemes = ["coap","doi","javascript","aaa","aaas","about","acap","cap","cid",
+           "crid","data","dav","dict","dns","file","ftp","geo","go","gopher",
+           "h323","http","https","iax","icap","im","imap","info","ipp","iris",
+           "iris.beep","iris.xpc","iris.xpcs","iris.lwz","ldap","mailto","mid",
+           "msrp","msrps","mtqp","mupdate","news","nfs","ni","nih","nntp",
+           "opaquelocktoken","pop","pres","rtsp","service","session","shttp","sieve",
+           "sip","sips","sms","snmp","soap.beep","soap.beeps","tag","tel","telnet",
+           "tftp","thismessage","tn3270","tip","tv","urn","vemmi","ws","wss","xcon",
+           "xcon-userid","xmlrpc.beep","xmlrpc.beeps","xmpp","z39.50r","z39.50s",
+           "adiumxtra","afp","afs","aim","apt","attachment","aw","beshare","bitcoin",
+           "bolo","callto","chrome","chrome-extension","com-eventbrite-attendee",
+           "content", "cvs","dlna-playsingle","dlna-playcontainer","dtn","dvb",
+           "ed2k","facetime","feed","finger","fish","gg","git","gizmoproject",
+           "gtalk","hcp","icon","ipn","irc","irc6","ircs","itms","jar","jms",
+           "keyparc","lastfm","ldaps","magnet","maps","market","message","mms",
+           "ms-help","msnim","mumble","mvn","notes","oid","palm","paparazzi",
+           "platform","proxy","psyc","query","res","resource","rmi","rsync",
+           "rtmp","secondlife","sftp","sgn","skype","smb","soldat","spotify",
+           "ssh","steam","svn","teamspeak","things","udp","unreal","ut2004",
+           "ventrilo","view-source","webcal","wtai","wyciwyg","xfire","xri",
+           "ymsgr"]
+
+uriScheme :: Parser [Char] st String
+uriScheme = oneOfStringsCI schemes
 
 -- | Parses a URI. Returns pair of original and URI-escaped version.
 uri :: Parser [Char] st (String, String)
 uri = try $ do
-  let protocols = [ "http:", "https:", "ftp:", "file:", "mailto:",
-                    "news:", "telnet:" ]
-  lookAhead $ oneOfStrings protocols
-  -- Scan non-ascii characters and ascii characters allowed in a URI.
-  -- We allow punctuation except when followed by a space, since
-  -- we don't want the trailing '.' in 'http://google.com.'
-  let innerPunct = try $ satisfy isPunctuation >>~
-                         notFollowedBy (newline <|> spaceChar)
-  let uriChar = innerPunct <|>
-                satisfy (\c -> not (isPunctuation c) &&
-                            (not (isAscii c) || isAllowedInURI c))
-  -- We want to allow
+  scheme <- uriScheme
+  char ':'
+  -- We allow punctuation except at the end, since
+  -- we don't want the trailing '.' in 'http://google.com.' We want to allow
   -- http://en.wikipedia.org/wiki/State_of_emergency_(disambiguation)
   -- as a URL, while NOT picking up the closing paren in
-  -- (http://wikipedia.org)
-  -- So we include balanced parens in the URL.
-  let inParens = try $ do char '('
-                          res <- many uriChar
-                          char ')'
-                          return $ '(' : res ++ ")"
-  str <- liftM concat $ many1 $ inParens <|> count 1 (innerPunct <|> uriChar)
+  -- (http://wikipedia.org). So we include balanced parens in the URL.
+  let isWordChar c = isAlphaNum c || c == '_' || c == '/' || c == '+' ||
+                         not (isAscii c)
+  let wordChar = satisfy isWordChar
+  let percentEscaped = try $ char '%' >> skipMany1 (satisfy isHexDigit)
+  let entity = () <$ characterReference
+  let punct = skipMany1 (char ',')
+          <|> () <$ (satisfy (\c -> not (isSpace c) && c /= '<'))
+  let uriChunk =  skipMany1 wordChar
+              <|> percentEscaped
+              <|> entity
+              <|> (try $ punct >>
+                    lookAhead (void (satisfy isWordChar) <|> percentEscaped))
+  str <- snd `fmap` withRaw (skipMany1 ( () <$
+                                         (enclosed (char '(') (char ')') uriChunk
+                                         <|> enclosed (char '{') (char '}') uriChunk
+                                         <|> enclosed (char '[') (char ']') uriChunk)
+                                         <|> uriChunk))
   str' <- option str $ char '/' >> return (str ++ "/")
-  -- now see if they amount to an absolute URI
-  case parseURI (escapeURI str') of
-       Just uri' -> if uriScheme uri' `elem` protocols
-                       then return (str', show uri')
-                       else fail "not a URI"
-       Nothing   -> fail "not a URI"
+  let uri' = scheme ++ ":" ++ fromEntities str'
+  return (uri', escapeURI uri')
 
 -- | Applies a parser, returns tuple of its results and its horizontal
 -- displacement (the difference between the source column at the end
@@ -412,7 +475,7 @@ withRaw parser = do
   let (l2,c2) = (sourceLine pos2, sourceColumn pos2)
   let inplines = take ((l2 - l1) + 1) $ lines inp
   let raw = case inplines of
-                []   -> error "raw: inplines is null" -- shouldn't happen
+                []   -> ""
                 [l]  -> take (c2 - c1) l
                 ls   -> unlines (init ls) ++ take (c2 - 1) (last ls)
   return (result, raw)
@@ -553,6 +616,23 @@ charRef = do
   c <- characterReference
   return $ Str [c]
 
+lineBlockLine :: Parser [Char] st String
+lineBlockLine = try $ do
+  char '|'
+  char ' '
+  white <- many (spaceChar >> return '\160')
+  notFollowedBy newline
+  line <- anyLine
+  continuations <- many (try $ char ' ' >> anyLine)
+  return $ white ++ unwords (line : continuations)
+
+-- | Parses an RST-style line block and returns a list of strings.
+lineBlockLines :: Parser [Char] st [String]
+lineBlockLines = try $ do
+  lines' <- many1 lineBlockLine
+  skipMany1 $ blankline <|> try (char '|' >> blankline)
+  return lines'
+
 -- | Parse a table using 'headerParser', 'rowParser',
 -- 'lineParser', and 'footerParser'.
 tableWith :: Parser [Char] ParserState ([[Block]], [Alignment], [Int])
@@ -689,13 +769,20 @@ gridTableFooter = blanklines
 ---
 
 -- | Parse a string with a given parser and state.
-readWith :: Parser [t] ParserState a      -- ^ parser
-         -> ParserState                    -- ^ initial state
-         -> [t]                            -- ^ input
+readWith :: Parser [Char] st a       -- ^ parser
+         -> st                       -- ^ initial state
+         -> [Char]                   -- ^ input
          -> a
 readWith parser state input =
     case runParser parser state "source" input of
-      Left err'    -> error $ "\nError:\n" ++ show err'
+      Left err'    ->
+        let errPos = errorPos err'
+            errLine = sourceLine errPos
+            errColumn = sourceColumn errPos
+            theline = (lines input ++ [""]) !! (errLine - 1)
+        in  error $ "\nError at " ++ show  err' ++ "\n" ++
+                theline ++ "\n" ++ replicate (errColumn - 1) ' ' ++
+                "^"
       Right result -> result
 
 -- | Parse a string with @parser@ (for testing).
@@ -717,19 +804,27 @@ data ParserState = ParserState
       stateSubstitutions   :: SubstTable,    -- ^ List of substitution references
       stateNotes           :: NoteTable,     -- ^ List of notes (raw bodies)
       stateNotes'          :: NoteTable',    -- ^ List of notes (parsed bodies)
-      stateTitle           :: [Inline],      -- ^ Title of document
-      stateAuthors         :: [[Inline]],    -- ^ Authors of document
-      stateDate            :: [Inline],      -- ^ Date of document
+      stateMeta            :: Meta,          -- ^ Document metadata
+      stateMeta'           :: F Meta,        -- ^ Document metadata
       stateHeaderTable     :: [HeaderType],  -- ^ Ordered list of header types used
+      stateHeaders         :: M.Map Inlines String, -- ^ List of headers and ids (used for implicit ref links)
+      stateIdentifiers     :: [String],      -- ^ List of header identifiers used
       stateNextExample     :: Int,           -- ^ Number of next example
       stateExamples        :: M.Map String Int, -- ^ Map from example labels to numbers
       stateHasChapters     :: Bool,          -- ^ True if \chapter encountered
       stateMacros          :: [Macro],       -- ^ List of macros defined so far
-      stateRstDefaultRole  :: String         -- ^ Current rST default interpreted text role
+      stateRstDefaultRole  :: String,        -- ^ Current rST default interpreted text role
+      stateWarnings        :: [String]       -- ^ Warnings generated by the parser
     }
 
 instance Default ParserState where
   def = defaultParserState
+
+instance HasMeta ParserState where
+  setMeta field val st =
+    st{ stateMeta = setMeta field val $ stateMeta st }
+  deleteMeta field st =
+    st{ stateMeta = deleteMeta field $ stateMeta st }
 
 defaultParserState :: ParserState
 defaultParserState =
@@ -743,15 +838,17 @@ defaultParserState =
                   stateSubstitutions   = M.empty,
                   stateNotes           = [],
                   stateNotes'          = [],
-                  stateTitle           = [],
-                  stateAuthors         = [],
-                  stateDate            = [],
+                  stateMeta            = nullMeta,
+                  stateMeta'           = return nullMeta,
                   stateHeaderTable     = [],
+                  stateHeaders         = M.empty,
+                  stateIdentifiers     = [],
                   stateNextExample     = 1,
                   stateExamples        = M.empty,
                   stateHasChapters     = False,
                   stateMacros          = [],
-                  stateRstDefaultRole  = "title-reference"}
+                  stateRstDefaultRole  = "title-reference",
+                  stateWarnings        = []}
 
 getOption :: (ReaderOptions -> a) -> Parser s ParserState a
 getOption f = (f . stateOptions) `fmap` getState
@@ -792,6 +889,34 @@ toKey = Key . map toLower . unwords . words
 type KeyTable = M.Map Key Target
 
 type SubstTable = M.Map Key Inlines
+
+--  | Add header to the list of headers in state, together
+--  with its associated identifier.  If the identifier is null
+--  and the auto_identifers extension is set, generate a new
+--  unique identifier, and update the list of identifiers
+--  in state.
+registerHeader :: Attr -> Inlines -> Parser s ParserState Attr
+registerHeader (ident,classes,kvs) header' = do
+  ids <- stateIdentifiers `fmap` getState
+  exts <- getOption readerExtensions
+  let insert' = M.insertWith (\_new old -> old)
+  if null ident && Ext_auto_identifiers `Set.member` exts
+     then do
+       let id' = uniqueIdent (B.toList header') ids
+       let id'' = if Ext_ascii_identifiers `Set.member` exts
+                     then catMaybes $ map toAsciiChar id'
+                     else id'
+       updateState $ \st -> st{
+              stateIdentifiers = if id' == id''
+                                    then id' : ids
+                                    else id' : id'' : ids,
+              stateHeaders = insert' header' id' $ stateHeaders st }
+       return (id'',classes,kvs)
+     else do
+        unless (null ident) $
+          updateState $ \st -> st{
+               stateHeaders = insert' header' ident $ stateHeaders st }
+        return (ident,classes,kvs)
 
 -- | Fail unless we're in "smart typography" mode.
 failUnlessSmart :: Parser [tok] ParserState ()
@@ -861,13 +986,7 @@ singleQuoteStart = do
   st <- getState
   -- single quote start can't be right after str
   guard $ stateLastStrPos st /= Just pos
-  try $ do charOrRef "'\8216\145"
-           notFollowedBy (oneOf ")!],;:-? \t\n")
-           notFollowedBy (char '.') <|> lookAhead (string "..." >> return ())
-           notFollowedBy (try (oneOfStrings ["s","t","m","ve","ll","re"] >>
-                               satisfy (not . isAlphaNum)))
-                               -- possess/contraction
-           return ()
+  () <$ charOrRef "'\8216\145"
 
 singleQuoteEnd :: Parser [Char] st ()
 singleQuoteEnd = try $ do
@@ -941,7 +1060,7 @@ nested p = do
 --
 
 -- | Parse a \newcommand or \renewcommand macro definition.
-macro :: Parser [Char] ParserState Block
+macro :: Parser [Char] ParserState Blocks
 macro = do
   apply <- getOption readerApplyMacros
   inp <- getInput
@@ -952,8 +1071,8 @@ macro = do
                            then do
                              updateState $ \st ->
                                st { stateMacros = ms ++ stateMacros st }
-                             return Null
-                           else return $ RawBlock "latex" def'
+                             return mempty
+                           else return $ rawBlock "latex" def'
 
 -- | Apply current macros to string.
 applyMacros' :: String -> Parser [Char] ParserState String
